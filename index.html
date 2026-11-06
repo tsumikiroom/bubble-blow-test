@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Bubble</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  canvas{display:block;width:100vw;height:100vh;height:100dvh}
+  [hidden]{display:none!important}
+  .ui{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    font:12px/1.4 -apple-system,system-ui,sans-serif;color:rgba(255,255,255,.55);letter-spacing:.04em}
+  #toggle{position:fixed;right:12px;top:calc(10px + env(safe-area-inset-top));background:none;border:0;
+    color:rgba(255,255,255,.45);font:12px -apple-system,system-ui,sans-serif;letter-spacing:.08em;padding:8px}
+  .panel{display:grid;grid-template-columns:72px 1fr 40px;gap:6px 10px;align-items:center;
+    background:rgba(0,0,0,.55);padding:10px 4px 4px;border-radius:8px}
+  .panel input{width:100%;accent-color:#9cf}
+  .panel span:last-child{text-align:right}
+  #err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+    color:#fff;font:14px/1.6 system-ui;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="toggle">TUNE</button>
+<div class="ui" id="ui" hidden>
+  <div class="panel" id="panel"></div>
+</div>
+<div id="err" hidden></div>
+<script>
+'use strict';
+const params = new URLSearchParams(location.search);
+const fixedT = params.has('t') ? parseFloat(params.get('t')) : null; // ?t=秒 で時刻を固定（スクショ用）
+
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', {antialias:false, alpha:false, premultipliedAlpha:false});
+if (!gl) {
+  const e = document.getElementById('err'); e.hidden = false;
+  e.textContent = 'WebGL2 is not available on this browser.';
+  throw new Error('no webgl2');
+}
+
+// ---------------- 調整できる値 ----------------
+const tune = {
+  thick:   {label:'Thickness', min:0.3, max:2.0, step:0.01, v:1.0},   // 膜厚の全体倍率
+  flow:    {label:'Flow',      min:0.0, max:3.0, step:0.01, v:1.0},   // 膜の流れの速さ
+  light:   {label:'Light',     min:0.2, max:3.0, step:0.01, v:1.0},   // 照明の強さ
+  fill:    {label:'Fill',      min:0.0, max:3.0, step:0.01, v:1.0},   // 周りの淡い光（縁の虹色）
+  size:    {label:'Size',      min:0.4, max:1.4, step:0.01, v:1.0},
+};
+const panel = document.getElementById('panel');
+for (const [k, o] of Object.entries(tune)) {
+  const l = document.createElement('span'); l.textContent = o.label;
+  const r = document.createElement('input'); r.type = 'range';
+  Object.assign(r, {min:o.min, max:o.max, step:o.step, value:o.v});
+  const n = document.createElement('span'); n.textContent = o.v.toFixed(2);
+  r.addEventListener('input', () => { o.v = parseFloat(r.value); n.textContent = o.v.toFixed(2); });
+  panel.append(l, r, n);
+}
+const ui = document.getElementById('ui');
+document.getElementById('toggle').addEventListener('click', () => { ui.hidden = !ui.hidden; });
+
+// ---------------- 波長→RGB の重み（CIE 1931 の近似、Wyman ほか 2013） ----------------
+const NL = 16;
+function g(x, mu, s1, s2) { const s = x < mu ? s1 : s2; const t = (x - mu) / s; return Math.exp(-0.5 * t * t); }
+const lambdas = [], weights = [];
+{
+  const sum = [0,0,0];
+  for (let i = 0; i < NL; i++) {
+    const l = 400 + (300 * (i + 0.5)) / NL;
+    const X = 1.056*g(l,599.8,37.9,31.0) + 0.362*g(l,442.0,16.0,26.7) - 0.065*g(l,501.1,20.4,26.2);
+    const Y = 0.821*g(l,568.8,46.9,40.5) + 0.286*g(l,530.9,16.3,31.1);
+    const Z = 1.217*g(l,437.0,11.8,36.0) + 0.681*g(l,459.0,26.0,13.8);
+    const r =  3.2406*X - 1.5372*Y - 0.4986*Z;
+    const gg = -0.9689*X + 1.8758*Y + 0.0415*Z;
+    const b =  0.0557*X - 0.2040*Y + 1.0570*Z;
+    lambdas.push(l); weights.push(r, gg, b);
+    sum[0] += r; sum[1] += gg; sum[2] += b;
+  }
+  // 反射率が全波長で同じなら白（1,1,1）になるように正規化
+  for (let i = 0; i < NL; i++) for (let c = 0; c < 3; c++) weights[i*3+c] /= sum[c];
+}
+
+// ---------------- シェーダー ----------------
+const vs = `#version 300 es
+in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+
+const fs = `#version 300 es
+precision highp float;
+out vec4 o;
+uniform vec2 uRes;
+uniform float uTime, uThick, uFlow, uLight, uFill, uSize, uYaw, uPitch;
+uniform vec3 uCenter;
+uniform vec3 uAxes;          // 楕円体の半径（ゆらぎ）
+uniform float uLambda[${NL}];
+uniform vec3 uW[${NL}];
+
+// ---- 3D simplex noise (Ashima / Stefan Gustavson, MIT) ----
+vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
+vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+float snoise(vec3 v){
+  const vec2 C=vec2(1.0/6.0,1.0/3.0); const vec4 D=vec4(0.0,0.5,1.0,2.0);
+  vec3 i=floor(v+dot(v,C.yyy)); vec3 x0=v-i+dot(i,C.xxx);
+  vec3 g=step(x0.yzx,x0.xyz); vec3 l=1.0-g; vec3 i1=min(g.xyz,l.zxy); vec3 i2=max(g.xyz,l.zxy);
+  vec3 x1=x0-i1+C.xxx; vec3 x2=x0-i2+C.yyy; vec3 x3=x0-D.yyy;
+  i=mod289(i);
+  vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+  float n_=0.142857142857; vec3 ns=n_*D.wyz-D.xzx;
+  vec4 j=p-49.0*floor(p*ns.z*ns.z); vec4 x_=floor(j*ns.z); vec4 y_=floor(j-7.0*x_);
+  vec4 x=x_*ns.x+ns.yyyy; vec4 y=y_*ns.x+ns.yyyy; vec4 h=1.0-abs(x)-abs(y);
+  vec4 b0=vec4(x.xy,y.xy); vec4 b1=vec4(x.zw,y.zw);
+  vec4 s0=floor(b0)*2.0+1.0; vec4 s1=floor(b1)*2.0+1.0; vec4 sh=-step(h,vec4(0.0));
+  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy; vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+  vec3 p0=vec3(a0.xy,h.x); vec3 p1=vec3(a0.zw,h.y); vec3 p2=vec3(a1.xy,h.z); vec3 p3=vec3(a1.zw,h.w);
+  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+  p0*=norm.x; p1*=norm.y; p2*=norm.z; p3*=norm.w;
+  vec4 m=max(0.5-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0); m=m*m;
+  return 105.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
+}
+
+mat3 rotY(float a){float c=cos(a),s=sin(a);return mat3(c,0.,-s, 0.,1.,0., s,0.,c);}
+mat3 rotX(float a){float c=cos(a),s=sin(a);return mat3(1.,0.,0., 0.,c,s, 0.,-s,c);}
+
+// ---- 膜厚（nm）: 上ほど薄く（重力で下へ排液）、渦を巻きながら下へ流れる ----
+float filmThickness(vec3 p){
+  float t = uTime * uFlow;
+  float h = p.y;
+  // 高さごとにずれて回る（緯度ごとの差回転）→ 縞が引き伸ばされて渦になる
+  float ang = 0.35*t + 0.9*sin(0.23*t + 2.2*h) + 0.5*sin(0.13*t - 3.1*h);
+  vec3 q = rotY(ang) * p;
+  // 流れを曲げる（ドメインワープ）
+  vec3 w = vec3(snoise(q*0.8 + vec3(0.0, 0.08*t, 0.0)),
+                snoise(q*0.8 + vec3(5.2, 1.3 + 0.08*t, 2.1)),
+                snoise(q*0.8 + vec3(1.7, 9.2 + 0.08*t, 4.4)));
+  vec3 r = q*1.05 + 1.1*w + vec3(0.0, 0.22*t, 0.0);   // y に時間を足す → 模様は下へ流れる
+  float n = 0.8*snoise(r) + 0.2*snoise(r*2.4 + 7.1);
+  // 排液: 上が薄い（〜160nm）、下が厚い（〜780nm）
+  float base = mix(780.0, 160.0, smoothstep(-1.1, 0.95, h));
+  float d = base * (1.0 + 0.3*n);
+  // 細い筋（下から上がってくる薄い膜の羽根＝縁再生）
+  float plume = smoothstep(0.55, 0.95, snoise(vec3(q.x*6.0, q.y*1.2 - 0.5*t, q.z*6.0)));
+  d *= 1.0 - 0.3*plume*smoothstep(0.6, -0.6, h);
+  // 頂上付近はさらに薄くなり、黒い膜（ほぼ反射しない）が点々と出る
+  float top = smoothstep(0.55, 1.0, h);
+  float spots = smoothstep(0.1, 0.6, snoise(q*3.5 + vec3(0.0, 0.2*t, 0.0)));
+  d = mix(d, 15.0, top*spots*0.95);
+  return max(d, 5.0) * uThick;
+}
+
+// ---- 薄膜干渉の反射率（波長ごとに Airy の式、s/p 偏光の平均）→ RGB ----
+vec3 filmReflect(float d, float cosi){
+  const float n = 1.34;
+  float sini2 = 1.0 - cosi*cosi;
+  float cost = sqrt(max(1.0 - sini2/(n*n), 0.0));
+  float rs = (cosi - n*cost)/(cosi + n*cost);
+  float rp = (n*cosi - cost)/(n*cosi + cost);
+  float rs2 = rs*rs, rp2 = rp*rp;
+  vec3 acc = vec3(0.0);
+  float opd = 4.0*3.14159265*n*d*cost;       // 位相差 = opd / λ
+  // 厚くなるほど干渉が薄まる（光のコヒーレンス・波長幅のぼけ）
+  float coh = exp(-pow(d*cost/2600.0, 2.0));
+  for (int i = 0; i < ${NL}; i++){
+    float c = cos(opd / uLambda[i]) * coh;
+    // 膜の上下で反射係数の符号が逆（r2 = -r1）
+    float Rs = 2.0*rs2*(1.0 - c) / (1.0 + rs2*rs2 - 2.0*rs2*c);
+    float Rp = 2.0*rp2*(1.0 - c) / (1.0 + rp2*rp2 - 2.0*rp2*c);
+    acc += uW[i] * (0.5*(Rs + Rp));
+  }
+  return max(acc, 0.0);
+}
+
+// ---- 架空のスタジオ: 黒い部屋に細長いソフトボックス、窓、天井の大きな面光源 ----
+float rectLight(vec3 ro, vec3 rd, vec3 c, vec3 nrm, vec3 u, vec2 hs, float soft){
+  float dn = dot(rd, nrm);
+  if (dn >= 0.0) return 0.0;               // nrm は光の面の表（球の方を向く）
+  float t = dot(c - ro, nrm) / dn;
+  if (t <= 0.0) return 0.0;
+  vec3 p = ro + rd*t - c;
+  vec3 v = cross(nrm, u);
+  vec2 a = abs(vec2(dot(p,u), dot(p,v))) / hs;
+  // 角を少し丸めた四角＋周りの淡いにじみ
+  vec2 q = max(a - (1.0 - soft), 0.0) / soft;
+  float e = length(q);
+  float core = 1.0 - smoothstep(0.75, 1.0, e);
+  float halo = exp(-3.0*max(e - 1.0, 0.0)) * 0.04;
+  return core + halo;
+}
+vec3 face(vec3 pos){ return normalize(-pos); }   // 原点（玉）の方を向く
+float windowLight(vec3 ro, vec3 rd, vec3 c, vec3 nrm, vec3 u, vec2 hs){
+  float dn = dot(rd, nrm);
+  if (dn >= 0.0) return 0.0;
+  float t = dot(c - ro, nrm) / dn;
+  if (t <= 0.0) return 0.0;
+  vec3 p = ro + rd*t - c;
+  vec3 v = cross(nrm, u);
+  vec2 a = vec2(dot(p,u), dot(p,v)) / hs;
+  if (max(abs(a.x), abs(a.y)) > 1.0) return 0.0;
+  // 窓の桟（十字＋縦の分割）
+  vec2 g = abs(fract(a*vec2(1.0, 1.0)*0.5 + 0.5) - 0.5);
+  float bar = step(0.035, min(g.x, g.y)) * step(0.035, abs(a.x)) ;
+  float edge = 1.0 - smoothstep(0.92, 1.0, max(abs(a.x), abs(a.y)));
+  return bar * edge * (0.75 + 0.25*a.y);
+}
+vec3 studio(vec3 ro, vec3 rd){
+  mat3 R = rotY(-uYaw) * rotX(-uPitch);
+  ro = R*ro; rd = R*rd;
+  vec3 L = vec3(0.0);
+  // 左手前の縦長ソフトボックス（メインの光）
+  vec3 c1 = vec3(-3.2, 0.4, 3.0);
+  L += vec3(1.0, 0.98, 0.95) * 30.0 * rectLight(ro, rd, c1, face(c1), normalize(cross(vec3(0,1,0), face(c1))), vec2(0.45, 2.6), 0.25);
+  // 右奥の細いストリップ（縁を照らす）
+  vec3 c2 = vec3(3.6, -0.2, -1.2);
+  L += vec3(0.95, 0.97, 1.0) * 16.0 * rectLight(ro, rd, c2, face(c2), normalize(cross(vec3(0,1,0), face(c2))), vec2(0.22, 3.0), 0.3);
+  // 右上手前の窓
+  vec3 c3 = vec3(2.4, 2.0, 3.4);
+  vec3 n3 = face(c3);
+  L += vec3(1.0) * 22.0 * windowLight(ro, rd, c3, n3, normalize(cross(vec3(0,1,0), n3)), vec2(0.9, 0.9));
+  // 天井の大きな面光源（弱め）
+  vec3 c4 = vec3(0.0, 4.5, 0.5);
+  L += vec3(1.0, 0.99, 0.97) * 4.0 * rectLight(ro, rd, c4, vec3(0,-1,0), vec3(1,0,0), vec2(2.4, 1.6), 0.5);
+  L *= uLight;
+  // 部屋の淡い明るさ（縁の虹色を浮かせる）。手前（カメラ側）は暗く、横・奥・下は少し明るい
+  // 玉の奥側（rd.z<0）は少し明るい壁、カメラ側は暗い。奥向きの反射は縁でしか起きないので、縁だけが光る
+  float back = smoothstep(0.1, -0.7, rd.z);
+  vec3 fill = vec3(0.5, 0.52, 0.56) * (0.01 + 0.3*back + 0.06*max(-rd.y, 0.0)*back);
+  L += fill * uFill;
+  return L;
+}
+
+// ---- 楕円体との交差（入りと出の2点） ----
+bool hitEllipsoid(vec3 ro, vec3 rd, vec3 c, vec3 ax, out float t0, out float t1){
+  vec3 o = (ro - c)/ax, d = rd/ax;
+  float A = dot(d,d), B = dot(o,d), C = dot(o,o) - 1.0;
+  float D = B*B - A*C;
+  if (D < 0.0) return false;
+  D = sqrt(D);
+  t0 = (-B - D)/A; t1 = (-B + D)/A;
+  return t1 > 0.0;
+}
+vec3 ellNormal(vec3 p, vec3 c, vec3 ax){ return normalize((p - c)/(ax*ax)); }
+
+vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / min(uRes.x, uRes.y);
+  vec3 ro = vec3(0.0, 0.0, 7.0);
+  vec3 rd = normalize(vec3(uv, -2.2));
+  vec3 ax = uAxes * uSize;
+  vec3 col = vec3(0.0);
+  float t0, t1;
+  if (hitEllipsoid(ro, rd, uCenter, ax, t0, t1)) {
+    // 手前の膜（外側からの反射）
+    vec3 p0 = ro + rd*t0;
+    vec3 n0 = ellNormal(p0, uCenter, ax);
+    float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
+    vec3 R0 = filmReflect(filmThickness((p0 - uCenter)/ax), c0);
+    col += R0 * studio(p0 - uCenter, reflect(rd, n0));
+    // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
+    vec3 p1 = ro + rd*t1;
+    vec3 n1 = ellNormal(p1, uCenter, ax);
+    float c1 = clamp(dot(rd, n1), 0.0, 1.0);
+    vec3 R1 = filmReflect(filmThickness((p1 - uCenter)/ax), c1);
+    vec3 T0 = 1.0 - R0;
+    col += T0 * R1 * studio(p1 - uCenter, reflect(rd, -n1)) * 0.9;
+  }
+  col = aces(col * 1.1);
+  col = pow(col, vec3(1.0/2.2));
+  // ごく弱いフィルムノイズ（帯状のムラを消す）
+  float nz = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)) + uTime) * 43758.5453);
+  col += (nz - 0.5) / 255.0;
+  o = vec4(col, 1.0);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+let prog;
+try {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+} catch (e) {
+  const el = document.getElementById('err'); el.hidden = false; el.textContent = 'Shader error: ' + e.message;
+  throw e;
+}
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'p');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+const U = {};
+for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uSize','uYaw','uPitch','uCenter','uAxes','uLambda','uW'])
+  U[n] = gl.getUniformLocation(prog, n);
+gl.uniform1fv(U.uLambda, new Float32Array(lambdas));
+gl.uniform3fv(U.uW, new Float32Array(weights));
+
+// ---------------- 画面サイズ（スマホは画素を抑えて軽く） ----------------
+// 重い端末では描画の解像度を自動で下げる（2 → 1.5 → 1）
+let dprCap = 2, slowFrames = 0, lastNow = 0;
+function watchSpeed(now) {
+  if (lastNow) {
+    const dt = now - lastNow;
+    if (dt > 24 && dt < 200) slowFrames++; else slowFrames = Math.max(0, slowFrames - 1);
+    if (slowFrames > 40 && dprCap > 1) { dprCap = dprCap > 1.5 ? 1.5 : 1; slowFrames = 0; }
+  }
+  lastNow = now;
+}
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+}
+window.addEventListener('resize', resize);
+
+// ---------------- ドラッグで照明（スタジオ）を回して映り込みを確かめる ----------------
+let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, drag = null;
+canvas.addEventListener('pointerdown', e => { drag = {x:e.clientX, y:e.clientY, yaw:tYaw, pitch:tPitch}; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const s = 3.0 / Math.min(innerWidth, innerHeight);
+  tYaw = drag.yaw + (e.clientX - drag.x) * s;
+  tPitch = Math.max(-0.8, Math.min(0.8, drag.pitch + (e.clientY - drag.y) * s));
+});
+const end = () => { drag = null; };
+canvas.addEventListener('pointerup', end);
+canvas.addEventListener('pointercancel', end);
+
+// ---------------- 描画ループ ----------------
+const t0 = performance.now();
+function frame(now) {
+  watchSpeed(now);
+  resize();
+  const t = fixedT !== null ? fixedT : (now - t0) / 1000;
+  yaw += (tYaw - yaw) * 0.12; pitch += (tPitch - pitch) * 0.12;
+  // ゆっくり漂う（ふわっと上下左右に揺れる）
+  const cx = 0.10*Math.sin(t*0.21) + 0.05*Math.sin(t*0.53 + 1.0);
+  const cy = 0.08*Math.sin(t*0.17 + 0.5) + 0.03*Math.sin(t*0.61);
+  // ごく小さく呼吸するように形がゆれる（体積はほぼ一定）
+  const a = 0.012*Math.sin(t*1.7) + 0.007*Math.sin(t*2.9 + 1.3);
+  const b = 0.010*Math.sin(t*2.3 + 0.7);
+  gl.uniform2f(U.uRes, canvas.width, canvas.height);
+  gl.uniform1f(U.uTime, t);
+  gl.uniform1f(U.uThick, tune.thick.v);
+  gl.uniform1f(U.uFlow, tune.flow.v);
+  gl.uniform1f(U.uLight, tune.light.v);
+  gl.uniform1f(U.uFill, tune.fill.v);
+  gl.uniform1f(U.uSize, tune.size.v);
+  gl.uniform1f(U.uYaw, yaw);
+  gl.uniform1f(U.uPitch, pitch);
+  gl.uniform3f(U.uCenter, cx, cy, 0.0);
+  gl.uniform3f(U.uAxes, 1.0 + a, 1.0 - a + b, 1.0 - b);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

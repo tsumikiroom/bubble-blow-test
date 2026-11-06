@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mic test</title>
+<style>
+  body{margin:0;background:#000;color:#ddd;font:15px/1.6 -apple-system,system-ui,sans-serif;padding:20px 16px calc(20px + env(safe-area-inset-bottom))}
+  h1{font-size:17px;margin:0 0 8px}
+  p{margin:6px 0;color:#aaa;font-size:13px}
+  button{font:inherit;padding:12px 18px;border-radius:10px;border:1px solid #555;background:#111;color:#fff;margin:10px 0}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+  td{border-bottom:1px solid #222;padding:6px 4px}
+  td:last-child{text-align:right;font-family:ui-monospace,monospace}
+  .ok{color:#7d7}.ng{color:#f77}
+  .meter{height:22px;background:#111;border-radius:6px;overflow:hidden;margin:6px 0}
+  .bar{height:100%;width:0;background:linear-gradient(90deg,#7cf,#fc6,#f66)}
+  #ua{font-size:11px;color:#666;word-break:break-all}
+</style>
+</head>
+<body>
+<h1>マイク確認（シャボン玉）</h1>
+<p>息を吹きかけたときの音を、端末の自動調整（音量の自動調整・雑音の除去）を切ってそのまま取れるか確かめるページです。録音や送信はしません。</p>
+<button id="go">マイクを使って確認する</button>
+<div id="out" hidden>
+  <table id="tbl"></table>
+  <p>下のバーに息を「弱く長く」「強く短く」吹きかけてみてください。</p>
+  <div>音の大きさ（全体）</div>
+  <div class="meter"><div class="bar" id="b1"></div></div>
+  <div>息らしさ（高い音の雑音）</div>
+  <div class="meter"><div class="bar" id="b2"></div></div>
+  <p id="peak"></p>
+  <p>確認してほしいこと: 上の表の「切れたか」が ○ か ×か。弱く吹いたときと強く吹いたときでバーの長さがはっきり変わるか（自動調整が残っていると、吹き続けるうちにバーが縮んでいきます）。</p>
+</div>
+<p id="err" class="ng"></p>
+<p id="ua"></p>
+<script>
+'use strict';
+document.getElementById('ua').textContent = navigator.userAgent;
+const want = {echoCancellation:false, noiseSuppression:false, autoGainControl:false};
+document.getElementById('go').addEventListener('click', async () => {
+  const err = document.getElementById('err'); err.textContent = '';
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {...want, channelCount: 1}});
+  } catch (e) { err.textContent = 'マイクを開けませんでした: ' + e.name + ' ' + e.message; return; }
+  const track = stream.getAudioTracks()[0];
+  // 開いた後にも念のためもう一度切るよう頼む
+  try { await track.applyConstraints(want); } catch (e) {}
+  const sup = navigator.mediaDevices.getSupportedConstraints ? navigator.mediaDevices.getSupportedConstraints() : {};
+  const set = track.getSettings ? track.getSettings() : {};
+  const rows = [['項目', '対応', '今の値', '切れたか']];
+  const names = {autoGainControl:'音量の自動調整', noiseSuppression:'雑音の除去', echoCancellation:'エコー除去'};
+  for (const k of Object.keys(want)) {
+    const v = set[k];
+    const ok = v === false ? '<span class="ok">○</span>' : v === undefined ? '？（報告なし）' : '<span class="ng">×</span>';
+    rows.push([names[k], sup[k] ? 'あり' : 'なし', String(v), ok]);
+  }
+  rows.push(['サンプリング周波数', '', String(set.sampleRate ?? '?'), '']);
+  document.getElementById('tbl').innerHTML = rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('');
+  document.getElementById('out').hidden = false;
+  document.getElementById('go').hidden = true;
+
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  await ac.resume();
+  const src = ac.createMediaStreamSource(stream);
+  const an = ac.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0;
+  src.connect(an);
+  const td = new Float32Array(an.fftSize), fd = new Float32Array(an.frequencyBinCount);
+  const hzPerBin = ac.sampleRate / an.fftSize;
+  let peak = 0;
+  const b1 = document.getElementById('b1'), b2 = document.getElementById('b2'), pk = document.getElementById('peak');
+  (function loop() {
+    an.getFloatTimeDomainData(td);
+    let s = 0; for (const x of td) s += x * x;
+    const rms = Math.sqrt(s / td.length);
+    const db = 20 * Math.log10(rms + 1e-9);
+    an.getFloatFrequencyData(fd);
+    // 息の雑音は 1〜6kHz 付近に広く出る
+    let e = 0, n = 0;
+    for (let i = Math.floor(1000 / hzPerBin); i < Math.min(fd.length, Math.floor(6000 / hzPerBin)); i++) { e += Math.pow(10, fd[i] / 10); n++; }
+    const bdb = 10 * Math.log10(e / Math.max(n, 1) + 1e-12);
+    const w1 = Math.max(0, Math.min(1, (db + 70) / 70));
+    const w2 = Math.max(0, Math.min(1, (bdb + 110) / 80));
+    b1.style.width = (w1 * 100).toFixed(1) + '%';
+    b2.style.width = (w2 * 100).toFixed(1) + '%';
+    peak = Math.max(peak * 0.995, db);
+    pk.textContent = '今 ' + db.toFixed(1) + ' dB ／ 直近の最大 ' + peak.toFixed(1) + ' dB ／ 息帯域 ' + bdb.toFixed(1) + ' dB';
+    requestAnimationFrame(loop);
+  })();
+});
+</script>
+</body>
+</html>
