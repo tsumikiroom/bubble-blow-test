@@ -28,6 +28,7 @@
   <div class="panel" id="panel"></div>
 </div>
 <div id="err" hidden></div>
+<script src="env-borghese-v1.js"></script>
 <script>
 'use strict';
 const params = new URLSearchParams(location.search);
@@ -43,12 +44,22 @@ if (!gl) {
 
 // ---------------- 調整できる値 ----------------
 const tune = {
-  thick:   {label:'Thickness', min:0.3, max:2.0, step:0.01, v:1.0},   // 膜厚の全体倍率
+  thick:   {label:'Thickness', min:0.5, max:2.5, step:0.01, v:1.0},   // 膜厚の全体倍率
   flow:    {label:'Flow',      min:0.0, max:3.0, step:0.01, v:1.0},   // 膜の流れの速さ
-  light:   {label:'Light',     min:0.2, max:3.0, step:0.01, v:1.0},   // 照明の強さ
-  fill:    {label:'Fill',      min:0.0, max:3.0, step:0.01, v:1.0},   // 周りの淡い光（縁の虹色）
+  light:   {label:'Light',     min:0.2, max:3.0, step:0.01, v:0.6},   // 照明の強さ
+  fill:    {label:'Fill',      min:0.0, max:3.0, step:0.01, v:1.0},   // スタジオ: 周りの淡い光
+  center:  {label:'Center',    min:0.0, max:3.0, step:0.01, v:0.15},  // 屋外: 正面の映り込みの強さ
+  edge:    {label:'Edge',      min:0.5, max:6.0, step:0.01, v:3.0},   // 屋外: 縁の映り込みの強さ
+  contrast:{label:'Contrast',  min:1.0, max:3.0, step:0.01, v:1.2},   // 屋外: 景色のコントラスト（ガンマ）
+  pivot:   {label:'Bright',    min:-3.0, max:3.0, step:0.01, v:0.0},  // 屋外: 景色の明るさ（段数）
+  turn:    {label:'Turn',      min:0.0, max:6.28, step:0.01, v:3.14}, // 屋外: 景色の向き
   size:    {label:'Size',      min:0.4, max:1.4, step:0.01, v:1.0},
 };
+// ?thick=1.5 のように URL で初期値を変えられる（見比べ用）
+for (const [k, o] of Object.entries(tune)) {
+  const x = parseFloat(params.get(k));
+  if (Number.isFinite(x)) o.v = Math.min(o.max, Math.max(o.min, x));
+}
 const panel = document.getElementById('panel');
 for (const [k, o] of Object.entries(tune)) {
   const l = document.createElement('span'); l.textContent = o.label;
@@ -57,6 +68,16 @@ for (const [k, o] of Object.entries(tune)) {
   const n = document.createElement('span'); n.textContent = o.v.toFixed(2);
   r.addEventListener('input', () => { o.v = parseFloat(r.value); n.textContent = o.v.toFixed(2); });
   panel.append(l, r, n);
+}
+// 映り込み: 青空（屋外）かスタジオか。?env=studio で最初からスタジオ
+let envSky = params.get('env') !== 'studio';
+{
+  const l = document.createElement('span'); l.textContent = 'Reflect';
+  const b = document.createElement('button');
+  b.style.cssText = 'grid-column:span 2;justify-self:start;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:4px 10px;font:inherit';
+  const show = () => { b.textContent = envSky ? 'Sky (outdoor)' : 'Studio'; };
+  b.addEventListener('click', () => { envSky = !envSky; show(); });
+  show(); panel.append(l, b);
 }
 const ui = document.getElementById('ui');
 document.getElementById('toggle').addEventListener('click', () => { ui.hidden = !ui.hidden; });
@@ -90,7 +111,8 @@ const fs = `#version 300 es
 precision highp float;
 out vec4 o;
 uniform vec2 uRes;
-uniform float uTime, uThick, uFlow, uLight, uFill, uSize, uYaw, uPitch;
+uniform float uTime, uThick, uFlow, uLight, uFill, uSize, uYaw, uPitch, uSky, uEnvYaw, uCenterGain, uEdgeGain, uContrast, uPivot;
+uniform sampler2D uEnv;
 uniform vec3 uCenter;
 uniform vec3 uAxes;          // 楕円体の半径（ゆらぎ）
 uniform float uLambda[${NL}];
@@ -137,16 +159,17 @@ float filmThickness(vec3 p){
                 snoise(q*0.8 + vec3(1.7, 9.2 + 0.08*t, 4.4)));
   vec3 r = q*1.05 + 1.1*w + vec3(0.0, 0.22*t, 0.0);   // y に時間を足す → 模様は下へ流れる
   float n = 0.8*snoise(r) + 0.2*snoise(r*2.4 + 7.1);
-  // 排液: 上が薄い（〜160nm）、下が厚い（〜780nm）
-  float base = mix(780.0, 160.0, smoothstep(-1.1, 0.95, h));
-  float d = base * (1.0 + 0.3*n);
+  // 膜はほぼ一様（約260nm）。色の変化は主に見る角度で出る → 中心から縁へ 青→マゼンタ→橙→黄 のグラデーション
+  // 排液でわずかに上が薄く、流れの模様はうっすら
+  float base = mix(305.0, 255.0, smoothstep(-1.0, 1.0, h));
+  float d = base * (1.0 + 0.07*n);
   // 細い筋（下から上がってくる薄い膜の羽根＝縁再生）
   float plume = smoothstep(0.55, 0.95, snoise(vec3(q.x*6.0, q.y*1.2 - 0.5*t, q.z*6.0)));
-  d *= 1.0 - 0.3*plume*smoothstep(0.6, -0.6, h);
+  d *= 1.0 - 0.06*plume*smoothstep(0.6, -0.6, h);
   // 頂上付近はさらに薄くなり、黒い膜（ほぼ反射しない）が点々と出る
   float top = smoothstep(0.55, 1.0, h);
-  float spots = smoothstep(0.1, 0.6, snoise(q*3.5 + vec3(0.0, 0.2*t, 0.0)));
-  d = mix(d, 15.0, top*spots*0.95);
+  float spots = smoothstep(0.45, 0.8, snoise(q*3.5 + vec3(0.0, 0.2*t, 0.0)));
+  d = mix(d, 15.0, top*spots*0.3);
   return max(d, 5.0) * uThick;
 }
 
@@ -230,6 +253,21 @@ vec3 studio(vec3 ro, vec3 rd){
   return L;
 }
 
+// ---- 屋外の HDRI（Borghese Gardens, Poly Haven CC0）。正距円筒図法、各色 log2 で 8bit に詰めてある ----
+vec3 sky(vec3 rd){
+  mat3 R = rotY(-uYaw - uEnvYaw) * rotX(-uPitch);
+  rd = normalize(R*rd);
+  vec2 uv = vec2(0.5 + atan(rd.x, -rd.z + 1e-6) * 0.15915494, acos(clamp(rd.y, -1.0, 1.0)) * 0.31830989);
+  vec3 v = texture(uEnv, uv).rgb;
+  // コントラスト: 明るさの対数（中央値=0）に倍率を掛ける＝ガンマ。暗い所はより沈み、明るい所はより上がる
+  float l2 = v.r*0.2126 + v.g*0.7152 + v.b*0.0722;          // 明るさ（対数のまま）
+  vec3 lg = v*24.0 - 12.0;
+  float L = l2*24.0 - 12.0;
+  lg += L * (uContrast - 1.0) + uPivot;                       // 色みは保ったまま明るさだけ伸ばす
+  return exp2(lg) * uLight;
+}
+vec3 env(vec3 ro, vec3 rd){ return uSky > 0.5 ? sky(rd) : studio(ro, rd); }
+
 // ---- 楕円体との交差（入りと出の2点） ----
 bool hitEllipsoid(vec3 ro, vec3 rd, vec3 c, vec3 ax, out float t0, out float t1){
   vec3 o = (ro - c)/ax, d = rd/ax;
@@ -242,6 +280,8 @@ bool hitEllipsoid(vec3 ro, vec3 rd, vec3 c, vec3 ax, out float t0, out float t1)
 }
 vec3 ellNormal(vec3 p, vec3 c, vec3 ax){ return normalize((p - c)/(ax*ax)); }
 
+// 物理の反射率に掛ける倍率。正面（cos=1）は uCenterGain、縁（cos→0）ほど uEdgeGain に近づく
+float gain(float c){ return uSky > 0.5 ? mix(uCenterGain, uEdgeGain, pow(1.0 - c, 1.5)) : 1.0; }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
 
 void main(){
@@ -257,14 +297,14 @@ void main(){
     vec3 n0 = ellNormal(p0, uCenter, ax);
     float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
     vec3 R0 = filmReflect(filmThickness((p0 - uCenter)/ax), c0);
-    col += R0 * studio(p0 - uCenter, reflect(rd, n0));
+    col += R0 * gain(c0) * env(p0 - uCenter, reflect(rd, n0));
     // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
     vec3 p1 = ro + rd*t1;
     vec3 n1 = ellNormal(p1, uCenter, ax);
     float c1 = clamp(dot(rd, n1), 0.0, 1.0);
     vec3 R1 = filmReflect(filmThickness((p1 - uCenter)/ax), c1);
     vec3 T0 = 1.0 - R0;
-    col += T0 * R1 * studio(p1 - uCenter, reflect(rd, -n1)) * 0.9;
+    col += T0 * R1 * gain(c1) * env(p1 - uCenter, reflect(rd, -n1)) * 0.9;
   }
   col = aces(col * 1.1);
   col = pow(col, vec3(1.0/2.2));
@@ -299,10 +339,35 @@ gl.enableVertexAttribArray(loc);
 gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
 const U = {};
-for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uSize','uYaw','uPitch','uCenter','uAxes','uLambda','uW'])
+for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uSize','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uCenter','uAxes','uLambda','uW'])
   U[n] = gl.getUniformLocation(prog, n);
 gl.uniform1fv(U.uLambda, new Float32Array(lambdas));
 gl.uniform3fv(U.uW, new Float32Array(weights));
+
+// ---------------- HDRI テクスチャ（env-borghese-v1.js の data URL） ----------------
+let envReady = false;
+{
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0,0,0,255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.uniform1i(U.uEnv, 0);
+  if (window.ENV_PNG) {
+    const img = new Image();
+    img.onload = () => {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);   // 色の自動変換で log の値がずれないように
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      envReady = true;
+    };
+    img.onerror = () => { envSky = false; };   // 読めなければスタジオ表示に
+    img.src = window.ENV_PNG;
+  }
+}
 
 // ---------------- 画面サイズ（スマホは画素を抑えて軽く） ----------------
 // 重い端末では描画の解像度を自動で下げる（2 → 1.5 → 1）
@@ -358,6 +423,12 @@ function frame(now) {
   gl.uniform1f(U.uSize, tune.size.v);
   gl.uniform1f(U.uYaw, yaw);
   gl.uniform1f(U.uPitch, pitch);
+  gl.uniform1f(U.uSky, envSky && envReady ? 1 : 0);
+  gl.uniform1f(U.uEnvYaw, tune.turn.v);
+  gl.uniform1f(U.uCenterGain, tune.center.v);
+  gl.uniform1f(U.uEdgeGain, tune.edge.v);
+  gl.uniform1f(U.uContrast, tune.contrast.v);
+  gl.uniform1f(U.uPivot, tune.pivot.v);
   gl.uniform3f(U.uCenter, cx, cy, 0.0);
   gl.uniform3f(U.uAxes, 1.0 + a, 1.0 - a + b, 1.0 - b);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
