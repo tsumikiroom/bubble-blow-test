@@ -116,7 +116,7 @@ const lambdas = [], weights = [];
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 
-const MAXB = 12;
+const MAXB = 12, MAXD = 48;
 const fs = `#version 300 es
 precision highp float;
 out vec4 o;
@@ -124,12 +124,16 @@ uniform vec2 uRes;
 uniform float uTime, uThick, uFlow, uLight, uFill, uYaw, uPitch, uSky, uEnvYaw, uCenterGain, uEdgeGain, uContrast, uPivot;
 uniform sampler2D uEnv;
 #define MAXB ${MAXB}
+#define MAXD ${MAXD}
 uniform int uN;               // 玉の数
 // 玉の形: 半径 r0 の球を、軸 u・v に沿った伸び縮み（P2）、卵形（P3）、くびれ（P4）でゆがめる
 uniform vec4 uBC[MAXB];       // 中心 xyz, 半径 r0
 uniform vec4 uBU[MAXB];       // 軸 u, 伸び a2（+ で u 方向に細長く）
 uniform vec4 uBV[MAXB];       // 軸 v, 伸び b2
 uniform vec4 uBK[MAXB];       // 卵形 a3, くびれ a4, 種 seed, 外接球の倍率
+uniform vec4 uBP[MAXB];       // 割れ: 穴の向き xyz, 穴の開き角（0 = 割れていない）
+uniform int uND;              // しぶきの数
+uniform vec4 uD[${MAXD}];     // しぶき: 位置 xyz, 明るさ
 uniform float uLambda[${NL}];
 uniform vec3 uW[${NL}];
 
@@ -320,7 +324,14 @@ vec3 shapeN(vec3 q, vec4 C, vec4 U, vec4 V, vec4 K){
 float gain(float c){ return uSky > 0.5 ? mix(uCenterGain, uEdgeGain, pow(1.0 - c, 1.5)) : 1.0; }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
 
-vec3 shadeBubble(vec3 ro, vec3 rd, vec4 C, vec4 U, vec4 V, vec4 K){
+// 割れ: 穴の向きからの角度が開き角より内側は膜がない。縁は液がたまって白っぽく光る
+vec2 holeMask(vec3 q, vec4 P){
+  if (P.w <= 0.0) return vec2(1.0, 0.0);
+  float a = acos(clamp(dot(normalize(q), P.xyz), -1.0, 1.0));
+  float d = a - P.w;
+  return vec2(smoothstep(0.0, 0.03, d), exp(-d*d/0.0015));
+}
+vec3 shadeBubble(vec3 ro, vec3 rd, vec4 C, vec4 U, vec4 V, vec4 K, vec4 P){
   vec3 col = vec3(0.0);
   vec3 o = ro - C.xyz, q0, q1;
   float seed = K.z;
@@ -328,14 +339,16 @@ vec3 shadeBubble(vec3 ro, vec3 rd, vec4 C, vec4 U, vec4 V, vec4 K){
   // 手前の膜（外側からの反射）
   vec3 n0 = shapeN(q0, C, U, V, K);
   float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
-  vec3 R0 = filmReflect(filmThickness(normalize(q0), seed), c0);
-  col += R0 * gain(c0) * env(q0, reflect(rd, n0));
+  vec2 h0 = holeMask(q0, P);
+  vec3 R0 = filmReflect(filmThickness(normalize(q0), seed), c0) * h0.x;
+  col += R0 * gain(c0) * env(q0, reflect(rd, n0)) + h0.y * 0.3;
   // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
   if (hitShape(o, rd, C, U, V, K, -1.0, q1)) {
     vec3 n1 = shapeN(q1, C, U, V, K);
     float c1 = clamp(dot(rd, n1), 0.0, 1.0);
-    vec3 R1 = filmReflect(filmThickness(normalize(q1), seed), c1);
-    col += (1.0 - R0) * R1 * gain(c1) * env(q1, reflect(rd, -n1)) * 0.9;
+    vec2 h1 = holeMask(q1, P);
+    vec3 R1 = filmReflect(filmThickness(normalize(q1), seed), c1) * h1.x;
+    col += (1.0 - R0) * (R1 * gain(c1) * env(q1, reflect(rd, -n1)) * 0.9 + h1.y * 0.2);
   }
   return col;
 }
@@ -348,7 +361,15 @@ void main(){
   // 重なった玉は反射を足し合わせる（膜の透過率はほぼ1なので順番はほとんど効かない）
   for (int i = 0; i < MAXB; i++){
     if (i >= uN) break;
-    col += shadeBubble(ro, rd, uBC[i], uBU[i], uBV[i], uBK[i]);
+    col += shadeBubble(ro, rd, uBC[i], uBU[i], uBV[i], uBK[i], uBP[i]);
+  }
+  // しぶき（割れたときに飛ぶ細かい粒）: 視線から粒までの距離で小さく光らせる
+  for (int i = 0; i < MAXD; i++){
+    if (i >= uND) break;
+    vec3 w = uD[i].xyz - ro;
+    float t = dot(w, rd);
+    float d = length(w - rd*t), s = 0.0022 * t;
+    col += vec3(0.9, 0.95, 1.0) * uD[i].w * exp(-d*d/(s*s));
   }
   col = aces(col * 1.1);
   col = pow(col, vec3(1.0/2.2));
@@ -383,7 +404,7 @@ gl.enableVertexAttribArray(loc);
 gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
 const U = {};
-for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uN','uBC','uBU','uBV','uBK','uLambda','uW'])
+for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uN','uBC','uBU','uBV','uBK','uBP','uND','uD','uLambda','uW'])
   U[n] = gl.getUniformLocation(prog, n);
 gl.uniform1fv(U.uLambda, new Float32Array(lambdas));
 gl.uniform3fv(U.uW, new Float32Array(weights));
@@ -526,6 +547,7 @@ function demoBreath(t) {
 
 // ---------------- シャボン玉の動き ----------------
 // カメラは z=7 から -z を見る。奥行き z の位置で画面の端がどこにあるか
+const CAMZ = 7;
 function viewHalf(z) {
   const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1, m = Math.min(w, h);
   const k = 0.5 * Math.max(7 - z, 0.1) / 2.2;
@@ -579,12 +601,57 @@ function release(b, s) {
   b.state = 'free';
   // 強く吹くほど小さく、遠く（奥）へ。弱いと手前に残る
   b.vz = -(0.3 + 8.0 * s * s);
-  b.vy = 0.35 + 0.5 * s;
+  b.vy = 0.3 + 0.15 * s;   // 下端から少し浮き上がる程度（奥へは視線に沿って行く）
   b.vx = (b.x >= 0 ? 1 : -1) * lerp(0.05, 0.6, rand()) * (0.2 + s);
   // プヨン: 卵形に引き伸ばされた膜が離れた瞬間に戻ろうとして、縦にポンと縮み、何度か揺れて丸に落ち着く
   b.a2v -= 6 * b.a2 + 1.5;
   b.a3v += 4;
   b.b2v += lerp(-1.5, 1.5, rand());
+}
+
+const POPDUR = 0.12, drops = [];
+function popDrop(b, ang) {
+  if (drops.length >= MAXD) drops.shift();
+  const h = b.pop.dir, e1 = norm(cross(h, Math.abs(h[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])), e2 = cross(h, e1);
+  const ph = rand() * Math.PI * 2, c = Math.cos(ang), sn = Math.sin(ang);
+  const out = [0, 1, 2].map(i => c * h[i] + sn * (Math.cos(ph) * e1[i] + Math.sin(ph) * e2[i]));
+  const tan = [0, 1, 2].map(i => -sn * h[i] + c * (Math.cos(ph) * e1[i] + Math.sin(ph) * e2[i]));   // 縁が縮む向き
+  const sp = b.r * lerp(1.5, 4, rand());
+  drops.push({x: b.x + out[0] * b.r, y: b.y + out[1] * b.r, z: b.z + out[2] * b.r,
+    vx: (tan[0] * 0.8 + out[0] * 0.5) * sp + b.vx, vy: (tan[1] * 0.8 + out[1] * 0.5) * sp + b.vy,
+    vz: (tan[2] * 0.8 + out[2] * 0.5) * sp + b.vz, life: lerp(0.25, 0.5, rand()), age: 0, a: lerp(0.6, 1.2, rand())});
+}
+function updateDrops(dt) {
+  for (const d of drops) {
+    d.age += dt; d.vy -= 3 * dt;
+    d.vx *= Math.exp(-2 * dt); d.vy *= Math.exp(-2 * dt); d.vz *= Math.exp(-2 * dt);
+    d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+  }
+  for (let i = drops.length - 1; i >= 0; i--) if (drops[i].age >= drops[i].life) drops.splice(i, 1);
+}
+// 触った所の玉を割る（指の先から視線を飛ばし、一番手前で当たった玉）
+function popAt(cx, cy) {
+  const w = canvas.clientWidth, h = canvas.clientHeight, m = Math.min(w, h);
+  const rd = norm([(cx - w / 2) / m, (h / 2 - cy) / m, -2.2]);
+  let best = null, bt = 1e9;
+  for (const b of bubbles) {
+    if (b.pop || b.state === 'gone' || b.state === 'out') continue;
+    const oc = [-b.x, -b.y, CAMZ - b.z];
+    // 小さい玉も指で割れるよう、当たりは画面で最低 22px 分の大きさにする
+    const rr = Math.max(b.r * 1.1, 22 / m * (CAMZ - b.z) / 2.2);
+    const bb = oc[0] * rd[0] + oc[1] * rd[1] + oc[2] * rd[2];
+    const cc = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - rr * rr;
+    const disc = bb * bb - cc;
+    if (disc < 0) continue;
+    const t = -bb - Math.sqrt(disc);
+    if (t > 0 && t < bt) { bt = t; best = b; }
+  }
+  if (!best) return false;
+  const hp = [rd[0] * bt - best.x, rd[1] * bt - best.y, CAMZ + rd[2] * bt - best.z];
+  best.pop = {dir: norm(hp), t: 0, ang: 0};
+  if (grower === best) grower = null;
+  if (best.state === 'grow') best.state = 'free';
+  return true;
 }
 
 function updateBubbles(dt, s) {
@@ -609,6 +676,17 @@ function updateBubbles(dt, s) {
 
   for (const b of bubbles) {
     const hy = viewHalf(b.z)[1];
+    if (b.pop) {
+      // 割れている最中: 穴が触った所から広がり、縁が縮みながらしぶきを飛ばす
+      b.pop.t += dt;
+      const p = Math.min(1, b.pop.t / POPDUR);
+      const ang = Math.PI * 1.08 * (1 - Math.pow(1 - p, 1.6));
+      const dAng = Math.max(0, ang - b.pop.ang); b.pop.ang = ang;
+      const nd = Math.round(dAng / Math.PI * 16);
+      for (let k = 0; k < nd; k++) popDrop(b, ang);
+      if (b.pop.t >= POPDUR) b.state = 'out';
+      continue;
+    }
     if (b.state === 'grow') {
       b.age += dt;
       // 下端に埋まった所から膨らむ。息で根元の細い卵形に伸び、息の揺らぎでぷるぷる波打つ
@@ -634,7 +712,7 @@ function updateBubbles(dt, s) {
     // 自然の風: ゆるく奥へ流れ、横に揺らめきながら玉ごとに少しずつ違う向きへ散る
     const T = simT;
     const wind = [0.4 * wav(T * 0.45, b.seed) + 0.3 * b.drift,
-                  0.15 * wav(T * 0.6, b.seed + 2) + 0.03,
+                  0.08 * wav(T * 0.6, b.seed + 2),
                   -0.5 - 0.4 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4))];
     // 小さい玉ほど風にすぐ乗る（吹き出した勢いはしばらく残る）
     const k = Math.min(1, dt * 0.35 / (b.r + 0.25));
@@ -643,8 +721,10 @@ function updateBubbles(dt, s) {
     b.vz += (wind[2] - b.vz) * k;
     // 手前の下の方は息に押される（奥と上へ）
     const nearBlow = s * Math.exp(-Math.max(0, b.y + hy) / 1.2) * Math.exp(-Math.max(0, 1.5 - b.z) / 1.5);
-    b.vy += 1.2 * nearBlow * dt; b.vz -= 2.0 * nearBlow * dt;
-    b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
+    b.vy += 0.4 * nearBlow * dt; b.vz -= 2.0 * nearBlow * dt;
+    // 奥行きの動きは視線に沿わせる（画面上の位置はそのままで小さくなる）。上下左右の流れはそれに足す
+    const e = b.vz * dt / (b.z - CAMZ);
+    b.x += b.x * e + b.vx * dt; b.y += b.y * e + b.vy * dt; b.z += b.vz * dt;
     // 飛んでいる間も少しゆがむ: 進む向きにやや平たく、風の揺らぎで波打つ。軸はゆっくり進む向きへ回る
     const sp = Math.hypot(b.vx, b.vy, b.vz);
     if (sp > 0.05) {
@@ -664,7 +744,7 @@ function updateBubbles(dt, s) {
   // 玉どうしは重ならないよう押し合う（くっついて面が平らになるのは「複数個」の段階で作る）
   for (let i = 0; i < bubbles.length; i++) for (let j = i + 1; j < bubbles.length; j++) {
     const a = bubbles[i], b = bubbles[j];
-    if (a.state === 'gone' || b.state === 'gone' || a.state === 'out' || b.state === 'out') continue;
+    if (a.state === 'gone' || b.state === 'gone' || a.state === 'out' || b.state === 'out' || a.pop || b.pop) continue;
     const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
     const d = Math.hypot(dx, dy, dz) || 1e-4, minD = (a.r + b.r) * 0.97;
     if (d >= minD) continue;
@@ -699,6 +779,7 @@ function step(dt) {
   simT += dt;
   breath = demo ? demoBreath(simT) : Math.max(keyS, micS);
   updateBubbles(dt, breath);
+  updateDrops(dt);
 }
 
 // ---------------- ドラッグで映り込みを回す／タップでマイクをオン ----------------
@@ -706,6 +787,7 @@ let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, drag = null;
 // マイクは click（指を離したとき）で開く。iPhone ではタッチの押し始めはユーザー操作として扱われないため
 canvas.addEventListener('click', () => { if (!single && !demo && !mic) startMic(); });
 canvas.addEventListener('pointerdown', e => {
+  if (!single && popAt(e.clientX - canvas.getBoundingClientRect().left, e.clientY - canvas.getBoundingClientRect().top)) return;
   drag = {x:e.clientX, y:e.clientY, yaw:tYaw, pitch:tPitch}; canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove', e => {
@@ -720,7 +802,8 @@ canvas.addEventListener('pointercancel', end);
 
 // ---------------- 描画ループ ----------------
 const bC = new Float32Array(MAXB * 4), bU = new Float32Array(MAXB * 4),
-      bV = new Float32Array(MAXB * 4), bK = new Float32Array(MAXB * 4);
+      bV = new Float32Array(MAXB * 4), bK = new Float32Array(MAXB * 4),
+      bP = new Float32Array(MAXB * 4), dD = new Float32Array(MAXD * 4);
 if (!single) for (let i = 0; i < warm * 60; i++) step(1 / 60);
 let lastFrame = 0;
 function frame(now) {
@@ -751,6 +834,15 @@ function frame(now) {
     bU.set([b.u[0], b.u[1], b.u[2], b.a2], i * 4);
     bV.set([v[0], v[1], v[2], b.b2], i * 4);
     bK.set([b.a3, b.a4, b.seed, bound], i * 4);
+    if (b.pop) {
+      const p = Math.min(1, b.pop.t / POPDUR);
+      bP.set([b.pop.dir[0], b.pop.dir[1], b.pop.dir[2], Math.max(1e-3, Math.PI * 1.08 * (1 - Math.pow(1 - p, 1.6)))], i * 4);
+    } else bP.set([0, 0, 1, 0], i * 4);
+  }
+  const nd = single ? 0 : Math.min(drops.length, MAXD);
+  for (let i = 0; i < nd; i++) {
+    const d = drops[i];
+    dD.set([d.x, d.y, d.z, d.a * (1 - d.age / d.life)], i * 4);
   }
   yaw += (tYaw - yaw) * 0.12; pitch += (tPitch - pitch) * 0.12;
   gl.uniform2f(U.uRes, canvas.width, canvas.height);
@@ -772,6 +864,9 @@ function frame(now) {
   gl.uniform4fv(U.uBU, bU);
   gl.uniform4fv(U.uBV, bV);
   gl.uniform4fv(U.uBK, bK);
+  gl.uniform4fv(U.uBP, bP);
+  gl.uniform1i(U.uND, nd);
+  gl.uniform4fv(U.uD, dD);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
