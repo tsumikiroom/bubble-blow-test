@@ -17,6 +17,11 @@
     background:rgba(0,0,0,.55);padding:10px 4px 4px;border-radius:8px}
   .panel input{width:100%;accent-color:#9cf}
   .panel span:last-child{text-align:right}
+  #hint{position:fixed;left:0;right:0;top:62%;text-align:center;padding:0 24px;pointer-events:none;
+    color:rgba(255,255,255,.6);font:14px/1.6 -apple-system,system-ui,sans-serif;letter-spacing:.04em;transition:opacity .8s}
+  #meter{position:fixed;left:50%;bottom:calc(4px + env(safe-area-inset-bottom));height:2px;width:0;
+    transform:translateX(-50%);background:rgba(255,255,255,.35);border-radius:1px;pointer-events:none}
+  #micinfo{grid-column:1 / -1;color:rgba(255,255,255,.45)}
   #err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
     color:#fff;font:14px/1.6 system-ui;text-align:center}
 </style>
@@ -27,6 +32,8 @@
 <div class="ui" id="ui" hidden>
   <div class="panel" id="panel"></div>
 </div>
+<div id="hint"></div>
+<div id="meter"></div>
 <div id="err" hidden></div>
 <script src="env-borghese-v1.js"></script>
 <script>
@@ -53,7 +60,9 @@ const tune = {
   contrast:{label:'Contrast',  min:1.0, max:3.0, step:0.01, v:1.2},   // 屋外: 景色のコントラスト（ガンマ）
   pivot:   {label:'Bright',    min:-3.0, max:3.0, step:0.01, v:0.0},  // 屋外: 景色の明るさ（段数）
   turn:    {label:'Turn',      min:0.0, max:6.28, step:0.01, v:3.14}, // 屋外: 景色の向き
-  size:    {label:'Size',      min:0.4, max:1.4, step:0.01, v:1.0},
+  size:    {label:'Size',      min:0.4, max:1.4, step:0.01, v:1.0},   // 玉の大きさの倍率
+  sens:    {label:'Mic sens',  min:4.0, max:30.0, step:0.5, v:12.0},  // 息と判定する大きさ（周りの音より何dB大きいか）。小さいほど敏感
+  span:    {label:'Mic range', min:10.0, max:50.0, step:0.5, v:28.0}, // 弱い息〜最強の息の幅（dB）
 };
 // ?thick=1.5 のように URL で初期値を変えられる（見比べ用）
 for (const [k, o] of Object.entries(tune)) {
@@ -107,14 +116,18 @@ const lambdas = [], weights = [];
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 
+const MAXB = 8;
 const fs = `#version 300 es
 precision highp float;
 out vec4 o;
 uniform vec2 uRes;
-uniform float uTime, uThick, uFlow, uLight, uFill, uSize, uYaw, uPitch, uSky, uEnvYaw, uCenterGain, uEdgeGain, uContrast, uPivot;
+uniform float uTime, uThick, uFlow, uLight, uFill, uYaw, uPitch, uSky, uEnvYaw, uCenterGain, uEdgeGain, uContrast, uPivot;
 uniform sampler2D uEnv;
-uniform vec3 uCenter;
-uniform vec3 uAxes;          // 楕円体の半径（ゆらぎ）
+#define MAXB 8
+uniform int uN;               // 玉の数
+uniform vec3 uBC[MAXB];       // 玉の中心
+uniform vec3 uBA[MAXB];       // 楕円体の半径（ゆがみ込み）
+uniform float uBS[MAXB];      // 玉ごとの種（膜の模様をずらす）
 uniform float uLambda[${NL}];
 uniform vec3 uW[${NL}];
 
@@ -147,12 +160,12 @@ mat3 rotY(float a){float c=cos(a),s=sin(a);return mat3(c,0.,-s, 0.,1.,0., s,0.,c
 mat3 rotX(float a){float c=cos(a),s=sin(a);return mat3(1.,0.,0., 0.,c,s, 0.,-s,c);}
 
 // ---- 膜厚（nm）: 上ほど薄く（重力で下へ排液）、渦を巻きながら下へ流れる ----
-float filmThickness(vec3 p){
-  float t = uTime * uFlow;
+float filmThickness(vec3 p, float seed){
+  float t = uTime * uFlow + seed * 37.0;
   float h = p.y;
   // 高さごとにずれて回る（緯度ごとの差回転）→ 縞が引き伸ばされて渦になる
   float ang = 0.35*t + 0.9*sin(0.23*t + 2.2*h) + 0.5*sin(0.13*t - 3.1*h);
-  vec3 q = rotY(ang) * p;
+  vec3 q = rotY(ang) * p + vec3(seed*7.3, 0.0, seed*3.1);
   // 流れを曲げる（ドメインワープ）
   vec3 w = vec3(snoise(q*0.8 + vec3(0.0, 0.08*t, 0.0)),
                 snoise(q*0.8 + vec3(5.2, 1.3 + 0.08*t, 2.1)),
@@ -284,27 +297,36 @@ vec3 ellNormal(vec3 p, vec3 c, vec3 ax){ return normalize((p - c)/(ax*ax)); }
 float gain(float c){ return uSky > 0.5 ? mix(uCenterGain, uEdgeGain, pow(1.0 - c, 1.5)) : 1.0; }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
 
+vec3 shadeBubble(vec3 ro, vec3 rd, vec3 c, vec3 ax, float seed){
+  vec3 col = vec3(0.0);
+  float t0, t1;
+  if (hitEllipsoid(ro, rd, c, ax, t0, t1)) {
+    // 手前の膜（外側からの反射）
+    vec3 p0 = ro + rd*t0;
+    vec3 n0 = ellNormal(p0, c, ax);
+    float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
+    vec3 R0 = filmReflect(filmThickness((p0 - c)/ax, seed), c0);
+    col += R0 * gain(c0) * env(p0 - c, reflect(rd, n0));
+    // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
+    vec3 p1 = ro + rd*t1;
+    vec3 n1 = ellNormal(p1, c, ax);
+    float c1 = clamp(dot(rd, n1), 0.0, 1.0);
+    vec3 R1 = filmReflect(filmThickness((p1 - c)/ax, seed), c1);
+    vec3 T0 = 1.0 - R0;
+    col += T0 * R1 * gain(c1) * env(p1 - c, reflect(rd, -n1)) * 0.9;
+  }
+  return col;
+}
+
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / min(uRes.x, uRes.y);
   vec3 ro = vec3(0.0, 0.0, 7.0);
   vec3 rd = normalize(vec3(uv, -2.2));
-  vec3 ax = uAxes * uSize;
   vec3 col = vec3(0.0);
-  float t0, t1;
-  if (hitEllipsoid(ro, rd, uCenter, ax, t0, t1)) {
-    // 手前の膜（外側からの反射）
-    vec3 p0 = ro + rd*t0;
-    vec3 n0 = ellNormal(p0, uCenter, ax);
-    float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
-    vec3 R0 = filmReflect(filmThickness((p0 - uCenter)/ax), c0);
-    col += R0 * gain(c0) * env(p0 - uCenter, reflect(rd, n0));
-    // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
-    vec3 p1 = ro + rd*t1;
-    vec3 n1 = ellNormal(p1, uCenter, ax);
-    float c1 = clamp(dot(rd, n1), 0.0, 1.0);
-    vec3 R1 = filmReflect(filmThickness((p1 - uCenter)/ax), c1);
-    vec3 T0 = 1.0 - R0;
-    col += T0 * R1 * gain(c1) * env(p1 - uCenter, reflect(rd, -n1)) * 0.9;
+  // 重なった玉は反射を足し合わせる（膜の透過率はほぼ1なので順番はほとんど効かない）
+  for (int i = 0; i < MAXB; i++){
+    if (i >= uN) break;
+    col += shadeBubble(ro, rd, uBC[i], uBA[i], uBS[i]);
   }
   col = aces(col * 1.1);
   col = pow(col, vec3(1.0/2.2));
@@ -339,7 +361,7 @@ gl.enableVertexAttribArray(loc);
 gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
 const U = {};
-for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uSize','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uCenter','uAxes','uLambda','uW'])
+for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uN','uBC','uBA','uBS','uLambda','uW'])
   U[n] = gl.getUniformLocation(prog, n);
 gl.uniform1fv(U.uLambda, new Float32Array(lambdas));
 gl.uniform3fv(U.uW, new Float32Array(weights));
@@ -388,9 +410,240 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 
-// ---------------- ドラッグで照明（スタジオ）を回して映り込みを確かめる ----------------
+// ---------------- モード ----------------
+// ?single=1 … 以前の「1個を眺める」表示（見た目の調整用）
+// ?demo=1   … マイクの代わりに決まった吹き方を繰り返す（確認・スクショ用）
+// ?warm=6   … 最初に 6 秒ぶん動かしてから表示（スクショ用）。?seed=数字 で乱数を固定
+const single = params.has('single');
+const demo = params.has('demo');
+const warm = Math.max(0, Math.min(30, parseFloat(params.get('warm')) || 0));
+let seed = parseInt(params.get('seed'), 10);
+if (!Number.isFinite(seed)) seed = (Math.random() * 1e9) | 0;
+function rand() {   // mulberry32
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp01 = x => Math.max(0, Math.min(1, x));
+const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// ---------------- 表示文字 ----------------
+const hintEl = document.getElementById('hint'), meterEl = document.getElementById('meter');
+let hintTimer = 0;
+function setHint(text, ms) {
+  clearTimeout(hintTimer);
+  hintEl.textContent = text; hintEl.style.opacity = 1;
+  if (ms) hintTimer = setTimeout(() => { hintEl.style.opacity = 0; }, ms);
+}
+if (single || demo) hintEl.hidden = true;
+else setHint('画面をタップしてマイクをオンに');
+if (single) meterEl.hidden = true;
+const micInfo = document.createElement('span'); micInfo.id = 'micinfo';
+if (!single) panel.append(micInfo);
+
+// ---------------- マイク（息の検出） ----------------
+// 息は 1〜6kHz に広がる雑音。周りの音の大きさ（ゆっくり追う下限）より何 dB 大きいかで強さを決める
+let mic = null, micBusy = false, micS = 0;
+async function startMic() {
+  if (mic || micBusy) return;
+  micBusy = true;
+  setHint('マイクを準備しています…');
+  let ac, stream;
+  try {
+    ac = new (window.AudioContext || window.webkitAudioContext)();   // タップの中で作る（iPhone の制約）
+    ac.resume().catch(() => {});
+    stream = await navigator.mediaDevices.getUserMedia({audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1}});
+    await ac.resume();
+    const src = ac.createMediaStreamSource(stream);
+    const an = ac.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0;
+    src.connect(an);
+    const hz = ac.sampleRate / an.fftSize;
+    mic = {ac, an, fd: new Float32Array(an.frequencyBinCount),
+      lo: Math.floor(1000 / hz), hi: Math.min(an.frequencyBinCount, Math.floor(6000 / hz)),
+      floor: null, t: 0, on: false, excess: 0};
+    setHint('画面の下（マイク）に向かって息を吹いて', 5000);
+  } catch (e) {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ac) ac.close();
+    setHint('マイクが使えません（' + e.name + '）。もう一度タップで再試行');
+  } finally { micBusy = false; }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden && mic) mic.ac.resume(); });
+function readMic(dt) {
+  const m = mic;
+  m.an.getFloatFrequencyData(m.fd);
+  let e = 0;
+  for (let i = m.lo; i < m.hi; i++) e += Math.pow(10, m.fd[i] / 10);
+  const db = 10 * Math.log10(e / (m.hi - m.lo) + 1e-12);
+  m.t += dt;
+  // 立ち上がり直後の無音（-100dB 未満）は周りの音の基準にしない。最初の 0.5 秒は判定しない
+  if (m.floor === null) { if (db < -100) return; m.floor = db; }
+  // 周りの音: 下がるのは速く、上がるのはゆっくり（息の最中に追いつかないように）。最初の 0.5 秒は素早く合わせる
+  const up = m.t < 0.5 ? 3 : 0.03;
+  m.floor += (db - m.floor) * Math.min(1, dt * (db < m.floor ? 3 : up));
+  m.excess = db - m.floor;
+  const sens = tune.sens.v;
+  m.on = m.t < 0.5 ? false : m.on ? m.excess > sens - 4 : m.excess > sens;            // 入り切りにすき間（ちらつき防止）
+  const raw = m.on ? lerp(0.05, 1, clamp01((m.excess - sens + 4) / tune.span.v)) : 0;
+  micS += (raw - micS) * Math.min(1, dt * (raw > micS ? 14 : 5));
+}
+
+// キーボード（PC で確認用）: 1=弱く長く 2=中くらい 3=強く 押している間だけ吹く
+const keyLevel = {'1': 0.15, '2': 0.5, '3': 0.9};
+let keyS = 0;
+addEventListener('keydown', e => { if (keyLevel[e.key]) keyS = keyLevel[e.key]; });
+addEventListener('keyup', e => { if (keyLevel[e.key]) keyS = 0; });
+// デモの吹き方（14 秒で一巡）: 弱く長く → 中くらい → 強く短く
+function demoBreath(t) {
+  const u = t % 14;
+  return u < 3 ? 0.15 : u < 5 ? 0 : u < 7 ? 0.5 : u < 9 ? 0 : u < 10 ? 0.9 : 0;
+}
+
+// ---------------- シャボン玉の動き ----------------
+// カメラは z=7 から -z を見る。奥行き z の位置で画面の端がどこにあるか
+function viewHalf(z) {
+  const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1, m = Math.min(w, h);
+  const k = 0.5 * (7 - z) / 2.2;
+  return [k * w / m, k * h / m];
+}
+const bubbles = [];
+let grower = null;      // いま膨らんでいる玉（画面の下端にくっついている）
+let breath = 0, simT = 0;
+
+function spawn() {
+  // 古い玉から消して上限を守る（割れ方は後の段階で作る。今はすっと縮んで消える）
+  if (bubbles.length >= MAXB) {
+    const i = bubbles.findIndex(b => b.state === 'gone');
+    const j = i >= 0 ? i : bubbles.findIndex(b => b.state === 'free');
+    if (j < 0) return null;
+    bubbles.splice(j, 1);
+  }
+  if (bubbles.filter(b => b.state !== 'gone').length >= MAXB - 1) {
+    const old = bubbles.find(b => b.state === 'free');
+    if (old) old.state = 'gone';
+  }
+  const z = lerp(-0.8, 0.3, rand());
+  const [hx] = viewHalf(z);
+  const b = {state: 'grow', x: lerp(-0.4, 0.4, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
+    r: 0.04, sAvg: breath, age: 0, wt: 0, seed: rand(), ax: [0, 0, 0],
+    A: 0, B: lerp(0.04, 0.1, rand()), ph: rand() * 6.28, w: 6, k: 1.8};
+  bubbles.push(b);
+  return b;
+}
+function release(b, s) {
+  b.state = 'free';
+  b.vy = 0.8 + 3.0 * s;                       // 強く吹くほど勢いよく飛ぶ
+  b.vx = lerp(-0.5, 0.5, rand()) * (0.3 + s); // 強いほど左右に散る
+  b.vz = lerp(-0.2, 0.1, rand());
+  b.A = 0.15 + 0.2 * s;                       // 離れた直後の縦の伸び → 震えながら丸に戻る
+  b.w = 5.0 / Math.sqrt(Math.max(b.r, 0.15)); // 小さい玉ほど速く震える
+  b.wt = 0;
+}
+function updateBubbles(dt, s) {
+  // 吹いている間: 下端で玉が膨らむ。弱く長く＝大きく育つ／強く＝すぐ離れて小さい玉が次々
+  if (s > 0.02) {
+    if (!grower) grower = spawn();
+    if (grower) {
+      const g = grower;
+      g.sAvg += (s - g.sAvg) * Math.min(1, dt * 3);
+      const rMax = lerp(0.95, 0.28, smooth(0.1, 0.85, g.sAvg)) * tune.size.v;
+      g.r += (0.25 + 1.6 * s) * dt;
+      g.age += dt;
+      if (g.r >= rMax) { g.r = rMax; release(g, s); grower = null; }
+    }
+  } else if (grower) {
+    // 息が止まった: ある程度育っていれば離れて飛ぶ、小さすぎればしぼんで消える
+    if (grower.r > 0.12) release(grower, Math.max(grower.sAvg, 0.1)); else grower.state = 'gone';
+    grower = null;
+  }
+
+  for (const b of bubbles) {
+    const [hx, hy] = viewHalf(b.z);
+    if (b.state === 'grow') {
+      // 下端に半分埋まった状態から膨らむ。息で縦に伸び、細かく震える
+      b.x += Math.sin(b.age * 7 + b.seed * 9) * 0.02 * s * dt * 10;
+      b.y = -hy + b.r * 0.7;
+      const e = 0.15 + 0.2 * s, j = 0.03 * Math.sin(b.age * 23);
+      b.ax = [b.r * (1 - 0.4 * e + j), b.r * (1 + e - j), b.r * (1 - 0.4 * e + j)];
+      continue;
+    }
+    if (b.state === 'gone') {
+      b.r *= Math.exp(-12 * dt);
+      b.ax = b.ax.map(v => v * Math.exp(-12 * dt));
+      continue;
+    }
+    b.wt += dt;
+    // 気流（ゆっくりした揺れ）、わずかな重さでゆっくり沈む、下の方は息に押し上げられる
+    const T = simT;
+    const fx = 0.25 * Math.sin(T * 0.7 + b.seed * 10) + 0.15 * Math.sin(T * 1.3 + b.seed * 3);
+    const fy = 0.12 * Math.sin(T * 0.5 + b.seed * 7) - 0.12
+      + s * 2.5 * Math.exp(-Math.max(0, b.y + hy) / 1.5);
+    b.vx += fx * dt; b.vy += fy * dt;
+    const drag = Math.exp(-1.2 * dt);
+    b.vx *= drag; b.vy *= drag; b.vz *= drag;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.z = Math.max(-1.5, Math.min(0.6, b.z + b.vz * dt));
+    // 震え: 縦横に伸び縮み（体積はほぼ一定）しながら弱まる
+    const d = Math.exp(-b.k * b.wt);
+    const m1 = b.A * Math.cos(b.w * b.wt) * d + 0.012 * Math.sin(T * 1.7 + b.seed * 9);
+    const m2 = b.B * Math.sin(b.w * 1.37 * b.wt + b.ph) * d + 0.01 * Math.sin(T * 2.3 + b.seed * 5);
+    const fyS = 1 + m1, q = 1 / Math.sqrt(fyS);
+    b.ax = [b.r * (1 + m2) * q, b.r * fyS, b.r * (1 - m2) * q];
+    // 画面の外へ出たら消す
+    if (b.y - b.r > hy + 0.3 || b.y + b.r < -hy - 0.6 || Math.abs(b.x) - b.r > hx + 0.3) b.state = 'out';
+  }
+  // 玉どうしは重ならないよう押し合う（くっついて面が平らになるのは「複数個」の段階で作る）
+  for (let i = 0; i < bubbles.length; i++) for (let j = i + 1; j < bubbles.length; j++) {
+    const a = bubbles[i], b = bubbles[j];
+    if (a.state === 'gone' || b.state === 'gone') continue;
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const d = Math.hypot(dx, dy, dz) || 1e-4, minD = (a.r + b.r) * 0.97;
+    if (d >= minD) continue;
+    const nx = dx / d, ny = dy / d, nz = dz / d;
+    const wa = a.state === 'grow' ? 0 : 1, wb = b.state === 'grow' ? 0 : 1;   // 膨らみ中の玉は動かさない
+    if (wa + wb === 0) continue;
+    const push = (minD - d) * Math.min(1, dt * 8) / (wa + wb);
+    a.x -= nx * push * wa; a.y -= ny * push * wa; a.z -= nz * push * wa;
+    b.x += nx * push * wb; b.y += ny * push * wb; b.z += nz * push * wb;
+    // 近づく向きの速さを消す
+    const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny + (b.vz - a.vz) * nz;
+    if (rv < 0) {
+      const k = rv / (wa + wb);
+      a.vx += nx * k * wa; a.vy += ny * k * wa; a.vz += nz * k * wa;
+      b.vx -= nx * k * wb; b.vy -= ny * k * wb; b.vz -= nz * k * wb;
+    }
+  }
+  for (let i = bubbles.length - 1; i >= 0; i--) {
+    const b = bubbles[i];
+    if (b.state === 'out' || (b.state === 'gone' && b.r < 0.01)) bubbles.splice(i, 1);
+  }
+}
+
+// 以前の 1 個表示（?single=1）
+function singleBubble(t) {
+  const cx = 0.10*Math.sin(t*0.21) + 0.05*Math.sin(t*0.53 + 1.0);
+  const cy = 0.08*Math.sin(t*0.17 + 0.5) + 0.03*Math.sin(t*0.61);
+  const a = 0.012*Math.sin(t*1.7) + 0.007*Math.sin(t*2.9 + 1.3);
+  const b = 0.010*Math.sin(t*2.3 + 0.7);
+  const r = tune.size.v;
+  return [{x: cx, y: cy, z: 0, seed: 0, ax: [r*(1 + a), r*(1 - a + b), r*(1 - b)]}];
+}
+
+function step(dt) {
+  simT += dt;
+  breath = demo ? demoBreath(simT) : Math.max(keyS, micS);
+  updateBubbles(dt, breath);
+}
+
+// ---------------- ドラッグで映り込みを回す／最初のタップでマイクをオン ----------------
 let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, drag = null;
-canvas.addEventListener('pointerdown', e => { drag = {x:e.clientX, y:e.clientY, yaw:tYaw, pitch:tPitch}; canvas.setPointerCapture(e.pointerId); });
+// マイクは click（指を離したとき）で開く。iPhone ではタッチの押し始めはユーザー操作として扱われないため
+canvas.addEventListener('click', () => { if (!single && !demo && !mic) startMic(); });
+canvas.addEventListener('pointerdown', e => {
+  drag = {x:e.clientX, y:e.clientY, yaw:tYaw, pitch:tPitch}; canvas.setPointerCapture(e.pointerId);
+});
 canvas.addEventListener('pointermove', e => {
   if (!drag) return;
   const s = 3.0 / Math.min(innerWidth, innerHeight);
@@ -402,25 +655,39 @@ canvas.addEventListener('pointerup', end);
 canvas.addEventListener('pointercancel', end);
 
 // ---------------- 描画ループ ----------------
-const t0 = performance.now();
+const bc = new Float32Array(MAXB * 3), ba = new Float32Array(MAXB * 3), bs = new Float32Array(MAXB);
+if (!single) for (let i = 0; i < warm * 60; i++) step(1 / 60);
+let lastFrame = 0;
 function frame(now) {
   watchSpeed(now);
   resize();
-  const t = fixedT !== null ? fixedT : (now - t0) / 1000;
+  const dt = lastFrame ? Math.min((now - lastFrame) / 1000, 1 / 20) : 1 / 60;
+  lastFrame = now;
+  let list;
+  if (single) {
+    simT = fixedT !== null ? fixedT : simT + dt;
+    list = singleBubble(simT);
+  } else {
+    if (mic) readMic(dt);
+    step(dt);
+    list = bubbles;
+    meterEl.style.width = (breath * 50).toFixed(1) + 'vw';
+    if (!ui.hidden) micInfo.textContent = mic
+      ? '息の大きさ ' + mic.excess.toFixed(1) + ' dB（' + tune.sens.v.toFixed(1) + ' dB 以上で吹いた判定）'
+      : 'マイク未接続（PC はキー 1/2/3 で吹ける）';
+  }
+  const n = Math.min(list.length, MAXB);
+  for (let i = 0; i < n; i++) {
+    const b = list[i];
+    bc.set([b.x, b.y, b.z], i * 3); ba.set(b.ax, i * 3); bs[i] = b.seed;
+  }
   yaw += (tYaw - yaw) * 0.12; pitch += (tPitch - pitch) * 0.12;
-  // ゆっくり漂う（ふわっと上下左右に揺れる）
-  const cx = 0.10*Math.sin(t*0.21) + 0.05*Math.sin(t*0.53 + 1.0);
-  const cy = 0.08*Math.sin(t*0.17 + 0.5) + 0.03*Math.sin(t*0.61);
-  // ごく小さく呼吸するように形がゆれる（体積はほぼ一定）
-  const a = 0.012*Math.sin(t*1.7) + 0.007*Math.sin(t*2.9 + 1.3);
-  const b = 0.010*Math.sin(t*2.3 + 0.7);
   gl.uniform2f(U.uRes, canvas.width, canvas.height);
-  gl.uniform1f(U.uTime, t);
+  gl.uniform1f(U.uTime, simT);
   gl.uniform1f(U.uThick, tune.thick.v);
   gl.uniform1f(U.uFlow, tune.flow.v);
   gl.uniform1f(U.uLight, tune.light.v);
   gl.uniform1f(U.uFill, tune.fill.v);
-  gl.uniform1f(U.uSize, tune.size.v);
   gl.uniform1f(U.uYaw, yaw);
   gl.uniform1f(U.uPitch, pitch);
   gl.uniform1f(U.uSky, envSky && envReady ? 1 : 0);
@@ -429,8 +696,10 @@ function frame(now) {
   gl.uniform1f(U.uEdgeGain, tune.edge.v);
   gl.uniform1f(U.uContrast, tune.contrast.v);
   gl.uniform1f(U.uPivot, tune.pivot.v);
-  gl.uniform3f(U.uCenter, cx, cy, 0.0);
-  gl.uniform3f(U.uAxes, 1.0 + a, 1.0 - a + b, 1.0 - b);
+  gl.uniform1i(U.uN, n);
+  gl.uniform3fv(U.uBC, bc);
+  gl.uniform3fv(U.uBA, ba);
+  gl.uniform1fv(U.uBS, bs);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   requestAnimationFrame(frame);
 }
