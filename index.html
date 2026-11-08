@@ -5,36 +5,166 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>Bubble</title>
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;
-    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
-  canvas{display:block;width:100vw;height:100vh;height:100dvh}
-  [hidden]{display:none!important}
-  .ui{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
-    font:12px/1.4 -apple-system,system-ui,sans-serif;color:rgba(255,255,255,.55);letter-spacing:.04em}
-  #toggle{position:fixed;right:12px;top:calc(10px + env(safe-area-inset-top));background:none;border:0;
-    color:rgba(255,255,255,.45);font:12px -apple-system,system-ui,sans-serif;letter-spacing:.08em;padding:8px}
-  .panel{display:grid;grid-template-columns:72px 1fr 40px;gap:6px 10px;align-items:center;
-    background:rgba(0,0,0,.55);padding:10px 4px 4px;border-radius:8px}
-  .panel input{width:100%;accent-color:#9cf}
-  .panel span:last-child{text-align:right}
-  #hint{position:fixed;left:0;right:0;top:62%;text-align:center;padding:0 24px;pointer-events:none;
-    color:rgba(255,255,255,.6);font:14px/1.6 -apple-system,system-ui,sans-serif;letter-spacing:.04em;transition:opacity .8s}
-  #meter{position:fixed;left:50%;bottom:calc(4px + env(safe-area-inset-bottom));height:2px;width:0;
-    transform:translateX(-50%);background:rgba(255,255,255,.35);border-radius:1px;pointer-events:none}
-  #micinfo{grid-column:1 / -1;color:rgba(255,255,255,.45)}
-  #err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
-    color:#fff;font:14px/1.6 system-ui;text-align:center}
+/* Line-drawing UI (same idea as pixel-stretch-test): white paper, 1px black lines, solid / dashed rules,
+   capsule shapes, bold plain grotesque type. The bubbles themselves stay on black. */
+:root { --ink: #111; --paper: #fff; --line: 1px solid var(--ink); }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
+  background: #000; color: var(--ink); touch-action: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  font: 500 15px/1.3 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif; letter-spacing: -.01em;
+}
+canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; }
+
+button {
+  font: inherit; color: var(--ink); background: var(--paper); cursor: pointer; touch-action: manipulation;
+  border: var(--line); border-radius: 999px; min-height: 44px; padding: 0 14px;
+}
+button.on { background: var(--ink); color: var(--paper); }
+.small { font-size: 12px; font-weight: 700; }
+
+/* ---- start sheet ---- */
+#start {
+  position: fixed; inset: 0; overflow-y: auto; touch-action: pan-y; background: var(--paper);
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
+}
+.sheet {
+  min-height: 100%; display: flex; flex-direction: column; gap: 18px;
+  border: var(--line); border-radius: 22px; padding: 16px 18px 18px;
+}
+.meta { display: flex; justify-content: space-between; gap: 12px; }
+.sheet h1 { margin: auto 0 0; font-size: 60px; line-height: .88; font-weight: 700; letter-spacing: -.045em; }
+.diagram { display: block; width: 100%; height: auto; overflow: visible; }
+.diagram text { font: 700 11px "Helvetica Neue", Helvetica, Arial, sans-serif; fill: var(--ink); }
+.sheet p { margin: 0; max-width: 30em; }
+.choose { display: grid; gap: 8px; }
+.choose button {
+  min-height: 60px; padding: 0 22px; display: flex; justify-content: space-between; align-items: center;
+  font-size: 18px; font-weight: 700; letter-spacing: -.02em;
+}
+.choose button:active { background: var(--ink); color: var(--paper); }
+.choose button.quiet { min-height: 48px; font-size: 15px; border-style: dashed; }
+#err { padding: 12px 14px; border: 1px dashed var(--ink); border-radius: 14px; white-space: pre-line; background: var(--paper); }
+#err::before { content: "Error"; display: block; margin-bottom: 4px; font-size: 12px; font-weight: 700; }
+.sheet .foot { margin-top: auto; padding-top: 12px; border-top: 1px dashed var(--ink); }
+
+/* ---- message over the bubbles ---- */
+#hint {
+  position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 28px); transform: translateX(-50%);
+  width: max-content; max-width: calc(100% - 32px); padding: 8px 16px;
+  background: var(--paper); border: var(--line); border-radius: 18px;
+  font-size: 14px; font-weight: 700; text-align: center; white-space: pre-line; pointer-events: none; transition: opacity .6s;
+}
+#hint:empty { display: none; }
+
+/* ---- control card (at the top: the bubbles are born at the bottom edge) ---- */
+#dock {
+  position: fixed; padding: 8px;
+  left: max(8px, env(safe-area-inset-left, 0px)); right: max(8px, env(safe-area-inset-right, 0px));
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
+  background: var(--paper); border: var(--line); border-radius: 22px;
+}
+.bar { display: flex; gap: 6px; align-items: center; }
+.bar button { flex: 1; padding: 0 6px; font-size: 14px; font-weight: 700; }
+.seg { flex: 2; display: flex; border: var(--line); border-radius: 999px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; min-height: 42px; }
+.seg button + button { border-left: var(--line); }
+#fold { flex: 0 0 44px; padding: 0; display: grid; place-items: center; }
+#fold svg { transition: transform .2s; }
+#dock.folded #fold svg { transform: rotate(180deg); }
+.knobs {
+  margin-top: 8px; padding: 0 6px; border-top: 1px solid var(--ink);
+  max-height: calc(100dvh - 160px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto; touch-action: pan-y;
+}
+#dock.folded .knobs { display: none; }
+.group { padding: 10px 0 2px; font-size: 12px; font-weight: 700; border-top: 1px dashed var(--ink); }
+.knobs > .group:first-child { border-top: 0; }
+.knob {
+  display: grid; grid-template-columns: 5.6em 1fr 4.2em; gap: 10px; align-items: center; min-height: 44px;
+  font-size: 15px; font-weight: 700; letter-spacing: -.01em;
+}
+.knob + .knob { border-top: 1px solid var(--ink); }
+.knob output { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* breath readout = the same ruler, filled up to the current breath, with a mark at the trigger level */
+.gauge { position: relative; height: 44px; }
+.gauge::before { content: ""; position: absolute; left: 8px; right: 8px; top: 50%; height: 1px; background: var(--ink); }
+.gauge i { position: absolute; left: 8px; top: calc(50% - 4px); height: 9px; width: 0; background: var(--ink); }
+.gauge b { position: absolute; top: calc(50% - 9px); width: 1px; height: 19px; background: var(--ink); }
+
+/* slider = a hairline ruler with tick marks and a ringed dot */
+input[type=range] {
+  --tick: 10%;
+  -webkit-appearance: none; appearance: none; width: 100%; height: 44px; margin: 0; background:
+    linear-gradient(var(--ink), var(--ink)) center / calc(100% - 16px) 1px no-repeat,
+    repeating-linear-gradient(90deg, var(--ink) 0 1px, transparent 1px var(--tick)) center / calc(100% - 16px) 7px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) right 8px center / 1px 7px no-repeat;
+}
+input[type=range]:focus { outline: none; }
+input[type=range]::-webkit-slider-runnable-track { height: 44px; background: transparent; }
+input[type=range]::-moz-range-track { height: 44px; background: transparent; }
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; margin-top: 14px; border-radius: 50%;
+  background: var(--ink); border: var(--line); box-shadow: inset 0 0 0 3px var(--paper);
+}
+input[type=range]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%; box-sizing: border-box;
+  background: var(--ink); border: var(--line); box-shadow: inset 0 0 0 3px var(--paper);
+}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="toggle">TUNE</button>
-<div class="ui" id="ui" hidden>
-  <div class="panel" id="panel"></div>
-</div>
 <div id="hint"></div>
-<div id="meter"></div>
-<div id="err" hidden></div>
+
+<div id="start" hidden>
+  <div class="sheet">
+    <div class="meta small"><span>No. 2</span><span>Breath / Microphone</span></div>
+    <h1>Bubble<br>Blow.</h1>
+    <svg class="diagram" viewBox="0 0 320 170" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1">
+      <!-- breath goes up from the microphone at the bottom of the phone: soft = one big bubble, hard = small ones far away -->
+      <path d="M100 160 H220" />
+      <path d="M150 160 V156 H170 V160" />
+      <path d="M160 150 C150 130, 170 118, 160 100" stroke-dasharray="4 4" />
+      <path d="M146 150 C132 128, 150 112, 136 92" stroke-dasharray="4 4" />
+      <path d="M174 150 C188 128, 170 112, 184 92" stroke-dasharray="4 4" />
+      <circle cx="92" cy="98" r="34" />
+      <path d="M74 82 A22 22 0 0 1 92 74" />
+      <circle cx="236" cy="56" r="10" />
+      <circle cx="264" cy="32" r="6" />
+      <circle cx="286" cy="64" r="4" />
+      <circle cx="40" cy="26" r="11" />
+      <circle cx="40" cy="26" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M30 16 L24 10 M50 16 L56 10 M30 36 L24 42 M50 36 L56 42" />
+      <text x="204" y="150" text-anchor="middle" stroke="none">mic</text>
+      <text x="92" y="148" text-anchor="middle" stroke="none">soft</text>
+      <text x="262" y="92" text-anchor="middle" stroke="none">hard</text>
+      <text x="40" y="58" text-anchor="middle" stroke="none">touch</text>
+    </svg>
+    <p>Blow into the microphone at the bottom of your phone. A soft, long breath grows one big bubble; a hard breath sends small ones flying. Touch a bubble to pop it.</p>
+    <div class="choose">
+      <button id="go"><span>Start with microphone</span><span aria-hidden="true">&rarr;</span></button>
+      <button id="nomic" class="quiet"><span>Watch without microphone</span><span aria-hidden="true">&rarr;</span></button>
+    </div>
+    <div id="err" hidden></div>
+    <div class="meta small foot"><span>Sound stays on this device</span><span>HTTPS</span></div>
+  </div>
+</div>
+
+<div id="dock" class="folded" hidden>
+  <div class="bar">
+    <div class="seg">
+      <button data-env="sky">Sky</button>
+      <button data-env="studio">Studio</button>
+    </div>
+    <button id="clear">Clear</button>
+    <button id="fold" aria-label="Show controls" aria-expanded="false"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></button>
+  </div>
+  <div class="knobs" id="knobs"></div>
+</div>
 <script src="env-borghese-v1.js"></script>
 <script>
 'use strict';
@@ -43,9 +173,14 @@ const fixedT = params.has('t') ? parseFloat(params.get('t')) : null; // ?t=秒 �
 
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl2', {antialias:false, alpha:false, premultipliedAlpha:false});
+// 動かせないときは開始画面を出し、ボタンの代わりに点線の枠で理由を見せる
+function showFatal(msg) {
+  document.getElementById('start').hidden = false;
+  document.querySelector('.choose').hidden = true;
+  const e = document.getElementById('err'); e.hidden = false; e.textContent = msg;
+}
 if (!gl) {
-  const e = document.getElementById('err'); e.hidden = false;
-  e.textContent = 'WebGL2 is not available on this browser.';
+  showFatal('WebGL2 is not available on this browser.');
   throw new Error('no webgl2');
 }
 
@@ -69,27 +204,52 @@ for (const [k, o] of Object.entries(tune)) {
   const x = parseFloat(params.get(k));
   if (Number.isFinite(x)) o.v = Math.min(o.max, Math.max(o.min, x));
 }
-const panel = document.getElementById('panel');
-for (const [k, o] of Object.entries(tune)) {
-  const l = document.createElement('span'); l.textContent = o.label;
-  const r = document.createElement('input'); r.type = 'range';
-  Object.assign(r, {min:o.min, max:o.max, step:o.step, value:o.v});
-  const n = document.createElement('span'); n.textContent = o.v.toFixed(2);
-  r.addEventListener('input', () => { o.v = parseFloat(r.value); n.textContent = o.v.toFixed(2); });
-  panel.append(l, r, n);
+// 操作カード: つまみは「Breath（マイク）」「Bubble」「Look」の3つに分けて並べる
+const knobsEl = document.getElementById('knobs');
+const groups = [
+  ['Breath', ['sens', 'span']],
+  ['Bubble', ['size', 'thick', 'flow']],
+  ['Look', ['light', 'fill', 'center', 'edge', 'contrast', 'pivot', 'turn']],
+];
+const fmt = {sens: v => v.toFixed(1) + ' dB', span: v => v.toFixed(0) + ' dB', size: v => v.toFixed(2) + '×'};
+let gaugeFill = null, gaugeMark = null, gaugeOut = null;
+for (const [title, keys] of groups) {
+  const h = document.createElement('div'); h.className = 'group'; h.textContent = title;
+  knobsEl.append(h);
+  if (title === 'Breath') {
+    // 今の息の大きさ（周りの音より何 dB 大きいか）。縦線が「吹いた」と判定する大きさ
+    const row = document.createElement('div'); row.className = 'knob';
+    const l = document.createElement('span'); l.textContent = 'Level';
+    const g = document.createElement('div'); g.className = 'gauge';
+    gaugeFill = document.createElement('i'); gaugeMark = document.createElement('b'); g.append(gaugeFill, gaugeMark);
+    gaugeOut = document.createElement('output'); gaugeOut.textContent = '–';
+    row.append(l, g, gaugeOut); knobsEl.append(row);
+  }
+  for (const k of keys) {
+    const o = tune[k];
+    const row = document.createElement('label'); row.className = 'knob';
+    const l = document.createElement('span'); l.textContent = ({sens: 'Trigger', span: 'Range'})[k] || o.label;
+    const r = document.createElement('input'); r.type = 'range';
+    Object.assign(r, {min:o.min, max:o.max, step:o.step, value:o.v});
+    const n = document.createElement('output');
+    const f = fmt[k] || (v => v.toFixed(2));
+    n.textContent = f(o.v);
+    r.addEventListener('input', () => { o.v = parseFloat(r.value); n.textContent = f(o.v); });
+    row.append(l, r, n); knobsEl.append(row);
+  }
 }
 // 映り込み: 青空（屋外）かスタジオか。?env=studio で最初からスタジオ
 let envSky = params.get('env') !== 'studio';
-{
-  const l = document.createElement('span'); l.textContent = 'Reflect';
-  const b = document.createElement('button');
-  b.style.cssText = 'grid-column:span 2;justify-self:start;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:4px 10px;font:inherit';
-  const show = () => { b.textContent = envSky ? 'Sky (outdoor)' : 'Studio'; };
-  b.addEventListener('click', () => { envSky = !envSky; show(); });
-  show(); panel.append(l, b);
-}
-const ui = document.getElementById('ui');
-document.getElementById('toggle').addEventListener('click', () => { ui.hidden = !ui.hidden; });
+const envBtns = document.querySelectorAll('[data-env]');
+const showEnv = () => envBtns.forEach(b => b.classList.toggle('on', (b.dataset.env === 'sky') === envSky));
+envBtns.forEach(b => b.addEventListener('click', () => { envSky = b.dataset.env === 'sky'; showEnv(); }));
+showEnv();
+const dock = document.getElementById('dock'), foldBtn = document.getElementById('fold');
+foldBtn.addEventListener('click', () => {
+  const folded = dock.classList.toggle('folded');
+  foldBtn.setAttribute('aria-expanded', String(!folded));
+  foldBtn.setAttribute('aria-label', folded ? 'Show controls' : 'Hide controls');
+});
 
 // ---------------- 波長→RGB の重み（CIE 1931 の近似、Wyman ほか 2013） ----------------
 const NL = 16;
@@ -116,7 +276,7 @@ const lambdas = [], weights = [];
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 
-const MAXB = 12, MAXD = 48;
+const MAXB = 12, MAXP = 4000;   // MAXP: しぶきの粒の上限
 const fs = `#version 300 es
 precision highp float;
 out vec4 o;
@@ -124,7 +284,6 @@ uniform vec2 uRes;
 uniform float uTime, uThick, uFlow, uLight, uFill, uYaw, uPitch, uSky, uEnvYaw, uCenterGain, uEdgeGain, uContrast, uPivot;
 uniform sampler2D uEnv;
 #define MAXB ${MAXB}
-#define MAXD ${MAXD}
 uniform int uN;               // 玉の数
 // 玉の形: 半径 r0 の球を、軸 u・v に沿った伸び縮み（P2）、卵形（P3）、くびれ（P4）でゆがめる
 uniform vec4 uBC[MAXB];       // 中心 xyz, 半径 r0
@@ -132,8 +291,6 @@ uniform vec4 uBU[MAXB];       // 軸 u, 伸び a2（+ で u 方向に細長く�
 uniform vec4 uBV[MAXB];       // 軸 v, 伸び b2
 uniform vec4 uBK[MAXB];       // 卵形 a3, くびれ a4, 種 seed, 外接球の倍率
 uniform vec4 uBP[MAXB];       // 割れ: 穴の向き xyz, 穴の開き角（0 = 割れていない）
-uniform int uND;              // しぶきの数
-uniform vec4 uD[${MAXD}];     // しぶき: 位置 xyz, 明るさ
 uniform float uLambda[${NL}];
 uniform vec3 uW[${NL}];
 
@@ -324,12 +481,23 @@ vec3 shapeN(vec3 q, vec4 C, vec4 U, vec4 V, vec4 K){
 float gain(float c){ return uSky > 0.5 ? mix(uCenterGain, uEdgeGain, pow(1.0 - c, 1.5)) : 1.0; }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
 
-// 割れ: 穴の向きからの角度が開き角より内側は膜がない。縁は液がたまって白っぽく光る
-vec2 holeMask(vec3 q, vec4 P){
+// 割れ（P.w = 進み具合 0..1、0 は割れていない）
+//  触った所から膜がめくれるように縮んでいく。縮む縁はノイズでぎざぎざで、縁のすぐ先の膜は
+//  引き裂かれて筋状に抜ける。縁には液がたまって白っぽく光る（しぶきは縁から霧のように飛ぶ: 別の描画）
+vec2 holeMask(vec3 q, vec4 P, float seed){
   if (P.w <= 0.0) return vec2(1.0, 0.0);
-  float a = acos(clamp(dot(normalize(q), P.xyz), -1.0, 1.0));
-  float d = a - P.w;
-  return vec2(smoothstep(0.0, 0.03, d), exp(-d*d/0.0015));
+  vec3 nq = normalize(q);
+  float p = P.w;
+  float a = acos(clamp(dot(nq, P.xyz), -1.0, 1.0));
+  float th = 3.3929 * (1.0 - pow(1.0 - p, 1.6));                       // 開き角（最後に 1.08π）
+  float d1 = a - th + 0.3 * snoise(nq * 2.5 + seed * 7.0) * smoothstep(0.0, 0.2, p);
+  // 縁の先 0.6rad ほどは膜が引き裂かれる（筋状のノイズで抜ける）
+  float zone = 1.0 - smoothstep(0.0, 0.6, a - th);
+  float n2 = snoise(vec3(nq.x * 9.0, nq.y * 9.0, nq.z * 3.0) + seed * 13.0);
+  float d2 = (n2 - mix(-1.5, 0.35, zone * smoothstep(0.05, 0.3, p))) * 0.4;
+  float d = min(d1, d2);
+  float fade = 1.0 - smoothstep(0.85, 1.0, p);
+  return vec2(smoothstep(0.0, 0.03, d) * fade, exp(-d*d/0.0015) * fade);
 }
 vec3 shadeBubble(vec3 ro, vec3 rd, vec4 C, vec4 U, vec4 V, vec4 K, vec4 P){
   vec3 col = vec3(0.0);
@@ -339,14 +507,14 @@ vec3 shadeBubble(vec3 ro, vec3 rd, vec4 C, vec4 U, vec4 V, vec4 K, vec4 P){
   // 手前の膜（外側からの反射）
   vec3 n0 = shapeN(q0, C, U, V, K);
   float c0 = clamp(dot(-rd, n0), 0.0, 1.0);
-  vec2 h0 = holeMask(q0, P);
+  vec2 h0 = holeMask(q0, P, seed);
   vec3 R0 = filmReflect(filmThickness(normalize(q0), seed), c0) * h0.x;
   col += R0 * gain(c0) * env(q0, reflect(rd, n0)) + h0.y * 0.3;
   // 奥の膜（内側からの反射。手前の膜を通り抜けた光）→ 小さく反転した映り込み
   if (hitShape(o, rd, C, U, V, K, -1.0, q1)) {
     vec3 n1 = shapeN(q1, C, U, V, K);
     float c1 = clamp(dot(rd, n1), 0.0, 1.0);
-    vec2 h1 = holeMask(q1, P);
+    vec2 h1 = holeMask(q1, P, seed);
     vec3 R1 = filmReflect(filmThickness(normalize(q1), seed), c1) * h1.x;
     col += (1.0 - R0) * (R1 * gain(c1) * env(q1, reflect(rd, -n1)) * 0.9 + h1.y * 0.2);
   }
@@ -362,14 +530,6 @@ void main(){
   for (int i = 0; i < MAXB; i++){
     if (i >= uN) break;
     col += shadeBubble(ro, rd, uBC[i], uBU[i], uBV[i], uBK[i], uBP[i]);
-  }
-  // しぶき（割れたときに飛ぶ細かい粒）: 視線から粒までの距離で小さく光らせる
-  for (int i = 0; i < MAXD; i++){
-    if (i >= uND) break;
-    vec3 w = uD[i].xyz - ro;
-    float t = dot(w, rd);
-    float d = length(w - rd*t), s = 0.0022 * t;
-    col += vec3(0.9, 0.95, 1.0) * uD[i].w * exp(-d*d/(s*s));
   }
   col = aces(col * 1.1);
   col = pow(col, vec3(1.0/2.2));
@@ -392,10 +552,12 @@ try {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 } catch (e) {
-  const el = document.getElementById('err'); el.hidden = false; el.textContent = 'Shader error: ' + e.message;
+  showFatal('Shader error: ' + e.message);
   throw e;
 }
 gl.useProgram(prog);
+const mainVao = gl.createVertexArray();
+gl.bindVertexArray(mainVao);
 const buf = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, buf);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
@@ -403,8 +565,61 @@ const loc = gl.getAttribLocation(prog, 'p');
 gl.enableVertexAttribArray(loc);
 gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
+// しぶきの霧: 粒を点として描き、玉の絵の上に足し合わせる（数千粒でも軽い）
+const mistVs = `#version 300 es
+in vec4 aD;            // 位置 xyz, 明るさ
+in float aS;           // 粒の大きさ（世界の長さ）
+uniform vec2 uRes;
+out float vA;
+void main(){
+  vec3 w = aD.xyz - vec3(0.0, 0.0, 7.0);
+  float dist = -w.z;
+  if (dist < 0.3) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); gl_PointSize = 0.0; return; }
+  float m = min(uRes.x, uRes.y);
+  vec2 uv = w.xy / dist * 2.2;
+  gl_Position = vec4(uv * 2.0 * m / uRes, 0.0, 1.0);
+  float px = aS * 2.2 * m / dist;
+  gl_PointSize = clamp(px, 1.0, 12.0);
+  vA = aD.w * min(1.0, px * px);   // 1px より小さい粒は暗くして大きさの代わりにする
+}`;
+const mistFs = `#version 300 es
+precision mediump float;
+in float vA;
+out vec4 o;
+void main(){
+  vec2 c = gl_PointCoord * 2.0 - 1.0;
+  float r2 = dot(c, c);
+  if (r2 > 1.0) discard;
+  o = vec4(vec3(0.88, 0.93, 1.0) * vA * (1.0 - r2 * r2), 1.0);
+}`;
+let mistProg;
+try {
+  mistProg = gl.createProgram();
+  gl.attachShader(mistProg, compile(gl.VERTEX_SHADER, mistVs));
+  gl.attachShader(mistProg, compile(gl.FRAGMENT_SHADER, mistFs));
+  gl.linkProgram(mistProg);
+  if (!gl.getProgramParameter(mistProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(mistProg));
+} catch (e) {
+  showFatal('Shader error: ' + e.message);
+  throw e;
+}
+const mistVao = gl.createVertexArray();
+gl.bindVertexArray(mistVao);
+const mistBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, mistBuf);
+gl.bufferData(gl.ARRAY_BUFFER, MAXP * 5 * 4, gl.DYNAMIC_DRAW);
+const aDLoc = gl.getAttribLocation(mistProg, 'aD'), aSLoc = gl.getAttribLocation(mistProg, 'aS');
+gl.enableVertexAttribArray(aDLoc);
+gl.vertexAttribPointer(aDLoc, 4, gl.FLOAT, false, 20, 0);
+gl.enableVertexAttribArray(aSLoc);
+gl.vertexAttribPointer(aSLoc, 1, gl.FLOAT, false, 20, 16);
+const uMistRes = gl.getUniformLocation(mistProg, 'uRes');
+const mistData = new Float32Array(MAXP * 5);
+gl.bindVertexArray(mainVao);
+gl.useProgram(prog);
+
 const U = {};
-for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uN','uBC','uBU','uBV','uBK','uBP','uND','uD','uLambda','uW'])
+for (const n of ['uRes','uTime','uThick','uFlow','uLight','uFill','uYaw','uPitch','uSky','uEnvYaw','uCenterGain','uEdgeGain','uContrast','uPivot','uEnv','uN','uBC','uBU','uBV','uBK','uBP','uLambda','uW'])
   U[n] = gl.getUniformLocation(prog, n);
 gl.uniform1fv(U.uLambda, new Float32Array(lambdas));
 gl.uniform3fv(U.uW, new Float32Array(weights));
@@ -473,7 +688,7 @@ const clamp01 = x => Math.max(0, Math.min(1, x));
 const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
 
 // ---------------- 表示文字 ----------------
-const hintEl = document.getElementById('hint'), meterEl = document.getElementById('meter');
+const hintEl = document.getElementById('hint');
 let hintTimer = 0;
 function setHint(text, ms) {
   clearTimeout(hintTimer);
@@ -481,10 +696,18 @@ function setHint(text, ms) {
   if (ms) hintTimer = setTimeout(() => { hintEl.style.opacity = 0; }, ms);
 }
 if (single || demo) hintEl.hidden = true;
-else setHint('画面をタップしてマイクをオンに');
-if (single) meterEl.hidden = true;
-const micInfo = document.createElement('span'); micInfo.id = 'micinfo';
-if (!single) panel.append(micInfo);
+// 最初に白い紙の開始画面。?demo / ?single では出さずに、そのまま動かす
+const startEl = document.getElementById('start'), errEl = document.getElementById('err');
+const goLabel = document.getElementById('go').firstElementChild;
+if (single || demo) dock.hidden = false; else startEl.hidden = false;
+function enter() { startEl.hidden = true; dock.hidden = false; }
+// マイクは click の中で開く（iPhone ではタッチの押し始めはユーザー操作として扱われない）
+document.getElementById('go').addEventListener('click', () => startMic());
+document.getElementById('nomic').addEventListener('click', () => {
+  enter();
+  setHint(matchMedia('(pointer: fine)').matches ? 'Hold 1 / 2 / 3 to blow soft / medium / hard' : 'No microphone. Reload to start again', 5000);
+});
+document.getElementById('clear').addEventListener('click', () => { bubbles.length = 0; drops.length = 0; grower = null; });
 
 // ---------------- マイク（息の検出） ----------------
 // 息は 1〜6kHz に広がる雑音。周りの音の大きさ（ゆっくり追う下限）より何 dB 大きいかで強さを決める
@@ -492,7 +715,8 @@ let mic = null, micBusy = false, micS = 0;
 async function startMic() {
   if (mic || micBusy) return;
   micBusy = true;
-  setHint('マイクを準備しています…');
+  errEl.hidden = true;
+  goLabel.textContent = 'Starting microphone…';
   let ac, stream;
   try {
     ac = new (window.AudioContext || window.webkitAudioContext)();   // タップの中で作る（iPhone の制約）
@@ -507,11 +731,14 @@ async function startMic() {
     mic = {ac, an, fd: new Float32Array(an.frequencyBinCount),
       lo: Math.floor(1000 / hz), hi: Math.min(an.frequencyBinCount, Math.floor(6000 / hz)),
       floor: null, t: 0, on: false, excess: 0};
-    setHint('画面の下（マイク）に向かって息を吹いて', 5000);
+    enter();
+    setHint('Blow into the mic at the bottom', 5000);
   } catch (e) {
     if (stream) stream.getTracks().forEach(t => t.stop());
     if (ac) ac.close();
-    setHint('マイクが使えません（' + e.name + '）。もう一度タップで再試行');
+    errEl.textContent = 'The microphone could not start (' + e.name + ').\nAllow microphone access for this page, then try again.';
+    errEl.hidden = false;
+    goLabel.textContent = 'Try again';
   } finally { micBusy = false; }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && mic) mic.ac.resume(); });
@@ -609,25 +836,37 @@ function release(b, s) {
   b.b2v += lerp(-1.5, 1.5, rand());
 }
 
-const POPDUR = 0.12, drops = [];
-function popDrop(b, ang) {
-  if (drops.length >= MAXD) drops.shift();
+const POPDUR = 0.16, drops = [];
+// 縁から飛ぶしぶき: 膜が縮む縁から、縮む向きへ細かい霧になって吹き出す。空気に止められて雲のように漂い、消える
+function popMist(b, ang, rimSpeed, n) {
   const h = b.pop.dir, e1 = norm(cross(h, Math.abs(h[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])), e2 = cross(h, e1);
-  const ph = rand() * Math.PI * 2, c = Math.cos(ang), sn = Math.sin(ang);
-  const out = [0, 1, 2].map(i => c * h[i] + sn * (Math.cos(ph) * e1[i] + Math.sin(ph) * e2[i]));
-  const tan = [0, 1, 2].map(i => -sn * h[i] + c * (Math.cos(ph) * e1[i] + Math.sin(ph) * e2[i]));   // 縁が縮む向き
-  const sp = b.r * lerp(1.5, 4, rand());
-  drops.push({x: b.x + out[0] * b.r, y: b.y + out[1] * b.r, z: b.z + out[2] * b.r,
-    vx: (tan[0] * 0.8 + out[0] * 0.5) * sp + b.vx, vy: (tan[1] * 0.8 + out[1] * 0.5) * sp + b.vy,
-    vz: (tan[2] * 0.8 + out[2] * 0.5) * sp + b.vz, life: lerp(0.25, 0.5, rand()), age: 0, a: lerp(0.6, 1.2, rand())});
+  const over = drops.length + n - MAXP;
+  if (over > 0) drops.splice(0, Math.min(over, drops.length));   // 上限を超える分は古い粒から一度に消す
+  for (let k = 0; k < n; k++) {
+    const ph = rand() * Math.PI * 2, an = ang - rand() * 0.12;
+    const c = Math.cos(an), sn = Math.sin(an), cp = Math.cos(ph), sp = Math.sin(ph);
+    const out = [0, 1, 2].map(i => c * h[i] + sn * (cp * e1[i] + sp * e2[i]));
+    const tan = [0, 1, 2].map(i => -sn * h[i] + c * (cp * e1[i] + sp * e2[i]));   // 縁が縮む向き
+    const big = rand() < 0.04;                          // ときどき大きめの粒
+    const v = rimSpeed * lerp(0.1, 0.5, rand()), vo = rimSpeed * lerp(-0.05, 0.2, rand());
+    const j = () => (rand() + rand() + rand() - 1.5) * 0.12 * rimSpeed;
+    drops.push({x: b.x + out[0] * b.r, y: b.y + out[1] * b.r, z: b.z + out[2] * b.r,
+      vx: tan[0] * v + out[0] * vo + j() + b.vx, vy: tan[1] * v + out[1] * vo + j() + b.vy, vz: tan[2] * v + out[2] * vo + j() + b.vz,
+      life: lerp(0.35, 0.9, rand()) * (big ? 1.3 : 1), age: 0, a: big ? lerp(0.7, 1.0, rand()) : lerp(0.45, 0.95, rand()),
+      s: b.r * (big ? lerp(0.03, 0.05, rand()) : lerp(0.01, 0.025, rand())), drag: big ? 3 : lerp(4, 7, rand())});
+  }
 }
 function updateDrops(dt) {
+  let n = 0;
   for (const d of drops) {
-    d.age += dt; d.vy -= 3 * dt;
-    d.vx *= Math.exp(-2 * dt); d.vy *= Math.exp(-2 * dt); d.vz *= Math.exp(-2 * dt);
+    d.age += dt;
+    if (d.age >= d.life) continue;
+    const f = Math.exp(-d.drag * dt);
+    d.vx *= f; d.vy = d.vy * f - 1.2 * dt; d.vz *= f;
     d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+    drops[n++] = d;
   }
-  for (let i = drops.length - 1; i >= 0; i--) if (drops[i].age >= drops[i].life) drops.splice(i, 1);
+  drops.length = n;
 }
 // 触った所の玉を割る（指の先から視線を飛ばし、一番手前で当たった玉）
 function popAt(cx, cy) {
@@ -682,8 +921,11 @@ function updateBubbles(dt, s) {
       const p = Math.min(1, b.pop.t / POPDUR);
       const ang = Math.PI * 1.08 * (1 - Math.pow(1 - p, 1.6));
       const dAng = Math.max(0, ang - b.pop.ang); b.pop.ang = ang;
-      const nd = Math.round(dAng / Math.PI * 16);
-      for (let k = 0; k < nd; k++) popDrop(b, ang);
+      // 縁の長さ（sin）と進んだ角度に比例して霧を出す。大きい玉ほど多い（1個で最大およそ 1000 粒）
+      const total = 350 + 550 * Math.min(1, b.r / 0.6);
+      b.pop.acc = (b.pop.acc || 0) + total * dAng * Math.max(0.15, Math.sin(Math.min(ang, Math.PI))) / 2;
+      const n = Math.floor(b.pop.acc); b.pop.acc -= n;
+      if (n > 0) popMist(b, ang, b.r * dAng / Math.max(dt, 1e-3), n);
       if (b.pop.t >= POPDUR) b.state = 'out';
       continue;
     }
@@ -782,10 +1024,8 @@ function step(dt) {
   updateDrops(dt);
 }
 
-// ---------------- ドラッグで映り込みを回す／タップでマイクをオン ----------------
+// ---------------- 玉に触ると割れる／何もない所はドラッグで映り込みを回す ----------------
 let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, drag = null;
-// マイクは click（指を離したとき）で開く。iPhone ではタッチの押し始めはユーザー操作として扱われないため
-canvas.addEventListener('click', () => { if (!single && !demo && !mic) startMic(); });
 canvas.addEventListener('pointerdown', e => {
   if (!single && popAt(e.clientX - canvas.getBoundingClientRect().left, e.clientY - canvas.getBoundingClientRect().top)) return;
   drag = {x:e.clientX, y:e.clientY, yaw:tYaw, pitch:tPitch}; canvas.setPointerCapture(e.pointerId);
@@ -803,7 +1043,7 @@ canvas.addEventListener('pointercancel', end);
 // ---------------- 描画ループ ----------------
 const bC = new Float32Array(MAXB * 4), bU = new Float32Array(MAXB * 4),
       bV = new Float32Array(MAXB * 4), bK = new Float32Array(MAXB * 4),
-      bP = new Float32Array(MAXB * 4), dD = new Float32Array(MAXD * 4);
+      bP = new Float32Array(MAXB * 4);
 if (!single) for (let i = 0; i < warm * 60; i++) step(1 / 60);
 let lastFrame = 0;
 function frame(now) {
@@ -819,10 +1059,13 @@ function frame(now) {
     if (mic) readMic(dt);
     step(dt);
     list = bubbles;
-    meterEl.style.width = (breath * 50).toFixed(1) + 'vw';
-    if (!ui.hidden) micInfo.textContent = mic
-      ? '息の大きさ ' + mic.excess.toFixed(1) + ' dB（' + tune.sens.v.toFixed(1) + ' dB 以上で吹いた判定）'
-      : 'マイク未接続（PC はキー 1/2/3 で吹ける）';
+    if (!dock.classList.contains('folded')) {
+      // 息の目盛り: 0〜40 dB を目盛りの幅に。縦線は「吹いた」と判定する大きさ
+      const x = v => Math.max(0, Math.min(1, v / 40)).toFixed(3);
+      gaugeMark.style.left = 'calc(8px + (100% - 16px) * ' + x(tune.sens.v) + ')';
+      gaugeFill.style.width = 'calc((100% - 16px) * ' + x(mic ? mic.excess : 0) + ')';
+      gaugeOut.textContent = mic ? Math.max(0, mic.excess).toFixed(0) + ' dB' : '–';
+    }
   }
   const n = Math.min(list.length, MAXB);
   for (let i = 0; i < n; i++) {
@@ -835,14 +1078,13 @@ function frame(now) {
     bV.set([v[0], v[1], v[2], b.b2], i * 4);
     bK.set([b.a3, b.a4, b.seed, bound], i * 4);
     if (b.pop) {
-      const p = Math.min(1, b.pop.t / POPDUR);
-      bP.set([b.pop.dir[0], b.pop.dir[1], b.pop.dir[2], Math.max(1e-3, Math.PI * 1.08 * (1 - Math.pow(1 - p, 1.6)))], i * 4);
+      bP.set([b.pop.dir[0], b.pop.dir[1], b.pop.dir[2], Math.max(1e-3, Math.min(1, b.pop.t / POPDUR))], i * 4);
     } else bP.set([0, 0, 1, 0], i * 4);
   }
-  const nd = single ? 0 : Math.min(drops.length, MAXD);
+  const nd = single ? 0 : Math.min(drops.length, MAXP);
   for (let i = 0; i < nd; i++) {
-    const d = drops[i];
-    dD.set([d.x, d.y, d.z, d.a * (1 - d.age / d.life)], i * 4);
+    const d = drops[i], k = i * 5, f = 1 - d.age / d.life;
+    mistData[k] = d.x; mistData[k + 1] = d.y; mistData[k + 2] = d.z; mistData[k + 3] = d.a * f * Math.sqrt(f); mistData[k + 4] = d.s;
   }
   yaw += (tYaw - yaw) * 0.12; pitch += (tPitch - pitch) * 0.12;
   gl.uniform2f(U.uRes, canvas.width, canvas.height);
@@ -865,9 +1107,19 @@ function frame(now) {
   gl.uniform4fv(U.uBV, bV);
   gl.uniform4fv(U.uBK, bK);
   gl.uniform4fv(U.uBP, bP);
-  gl.uniform1i(U.uND, nd);
-  gl.uniform4fv(U.uD, dD);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (nd > 0) {
+    gl.useProgram(mistProg);
+    gl.bindVertexArray(mistVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mistBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mistData, 0, nd * 5);
+    gl.uniform2f(uMistRes, canvas.width, canvas.height);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.POINTS, 0, nd);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(mainVao);
+    gl.useProgram(prog);
+  }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
