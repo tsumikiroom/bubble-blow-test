@@ -824,11 +824,13 @@ function springs(b, tgt, force, dt) {
   for (const k of MODES) b[k] = Math.max(-0.45, Math.min(0.45, b[k]));
 }
 
+// 玉の軽さ（風・息への乗りやすさの倍率）: 半径 0.1 で約 1.4、0.3 で約 0.9、1.0 で約 0.5
+const sizeLight = r => Math.max(0.5, Math.min(1.8, Math.sqrt(0.3 / (r + 0.05))));
 function release(b, s) {
   b.state = 'free';
   // 強く吹くほど小さく、遠く（奥）へ。弱いと手前に残る
   b.vz = -(0.3 + 3.0 * s * s);
-  b.vy = 1.0 + 4.5 * s;   // 下のマイクに吹く息で上へ飛ぶ。強いほど勢いよく
+  b.vy = (0.4 + 4.5 * s) * sizeLight(b.r);   // 下のマイクに吹く息で上へ飛ぶ。強いほど、小さいほど勢いよく
   b.vx = (b.x >= 0 ? 1 : -1) * lerp(0.05, 0.6, rand()) * (0.2 + s);
   // プヨン: 卵形に引き伸ばされた膜が離れた瞬間に戻ろうとして、縦にポンと縮み、何度か揺れて丸に落ち着く
   b.a2v -= 6 * b.a2 + 1.5;
@@ -951,19 +953,21 @@ function updateBubbles(dt, s) {
     }
     if (b.state === 'gone') { b.r *= Math.exp(-12 * dt); continue; }
 
-    // 自然の風: ゆるく奥へ流れ、横に揺らめきながら玉ごとに少しずつ違う向きへ散る
+    // 吹いている間: 息の上昇気流で画面の上へ吹き上がる（下の方ほど強い）。少し奥へも押される
+    // 吹いていない間: 空気に止められて、その場でゆらゆら漂う（ごくゆっくり横と奥へ）
+    // 大きさの差: 大きい玉は重く鈍い（息にゆっくり乗り、上がりも控えめ）。小さい玉は軽く、息ですぐ飛ばされ、よく揺れる
     const T = simT;
-    const wind = [0.4 * wav(T * 0.45, b.seed) + 0.3 * b.drift,
-                  0.08 * wav(T * 0.6, b.seed + 2),
-                  -0.5 - 0.4 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4))];
-    // 小さい玉ほど風にすぐ乗る（吹き出した勢いはしばらく残る）
-    const k = Math.min(1, dt * 0.35 / (b.r + 0.25));
+    const hn = clamp01((b.y + hy) / (2 * hy));            // 画面の高さ 0（下端）〜1（上端）
+    const light = sizeLight(b.r);
+    const lift = s * hy * (1.6 - 0.8 * hn) * light;
+    const wind = [(0.12 * wav(T * 0.45, b.seed) + 0.06 * b.drift + s * 0.25 * b.drift) * light,
+                  0.06 * wav(T * 0.6, b.seed + 2) * light + lift,
+                  -0.04 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4)) - 0.8 * s * light];
+    // 空気に乗る速さ: 小さい玉ほど速い。吹いている間は息にすぐ乗るよう強め
+    const k = Math.min(1, dt * (1.5 + 2.5 * s) * 0.7 / (b.r + 0.1));
     b.vx += (wind[0] - b.vx) * k;
-    b.vy += (wind[1] - b.vy) * k - 0.06 * dt;             // わずかな重さ
+    b.vy += (wind[1] - b.vy) * k - 0.04 * dt;             // わずかな重さ
     b.vz += (wind[2] - b.vz) * k;
-    // 手前の下の方は息に押される（上と奥へ。吹いている間は浮いている玉も上へ吹き上がる）
-    const nearBlow = s * Math.exp(-Math.max(0, b.y + hy) / 2.0) * Math.exp(-Math.max(0, 1.5 - b.z) / 1.5);
-    b.vy += 4.0 * nearBlow * dt; b.vz -= 2.0 * nearBlow * dt;
     // 奥行きの動きは視線に沿わせる（画面上の位置はそのままで小さくなる）。上下左右の流れはそれに足す
     const e = b.vz * dt / (b.z - CAMZ);
     b.x += b.x * e + b.vx * dt; b.y += b.y * e + b.vy * dt; b.z += b.vz * dt;
@@ -979,7 +983,7 @@ function updateBubbles(dt, s) {
     springs(b, tgt, {}, dt);
     // 画面外・遠すぎ・カメラの後ろへ出たら消す
     const [hx2, hy2] = viewHalf(b.z);
-    if (b.z < -30 || b.z > 5.5 || b.y - b.r > hy2 + 0.3 || b.y + b.r < -hy2 - 1.0 || Math.abs(b.x) - b.r > hx2 + 0.3)
+    if (b.z < -30 || b.z > 5.5 || b.y - b.r > hy2 || b.y + b.r < -hy2 - 1.0 || Math.abs(b.x) - b.r > hx2 + 0.3)
       b.state = 'out';
   }
 
