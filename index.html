@@ -276,7 +276,7 @@ const lambdas = [], weights = [];
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 
-const MAXB = 12, MAXP = 4000;   // MAXP: しぶきの粒の上限
+const MAXB = 20, MAXP = 4000;   // MAXP: しぶきの粒の上限
 const fs = `#version 300 es
 precision highp float;
 out vec4 o;
@@ -707,7 +707,7 @@ document.getElementById('nomic').addEventListener('click', () => {
   enter();
   setHint(matchMedia('(pointer: fine)').matches ? 'Hold 1 / 2 / 3 to blow soft / medium / hard' : 'No microphone. Reload to start again', 5000);
 });
-document.getElementById('clear').addEventListener('click', () => { bubbles.length = 0; drops.length = 0; grower = null; });
+document.getElementById('clear').addEventListener('click', () => { bubbles.length = 0; drops.length = 0; growers.length = 0; });
 
 // ---------------- マイク（息の検出） ----------------
 // 息は 1〜6kHz に広がる雑音。周りの音の大きさ（ゆっくり追う下限）より何 dB 大きいかで強さを決める
@@ -786,7 +786,7 @@ const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1]
 const wav = (t, s) => 0.6 * Math.sin(t + s * 6.1) + 0.4 * Math.sin(t * 2.31 + s * 13.7);
 
 const bubbles = [];
-let grower = null;      // いま膨らんでいる玉（画面の下端にくっついている）
+const growers = [];     // いま膨らんでいる玉（画面の下端にくっついている）。強く吹くと同時に何個も
 let breath = 0, prevBreath = 0, simT = 0;
 const MODES = ['a2', 'b2', 'a3', 'a4'];
 
@@ -801,10 +801,16 @@ function spawn() {
   }
   const z = lerp(1.0, 1.8, rand());
   const [hx] = viewHalf(z);
-  const b = {state: 'grow', x: lerp(-0.3, 0.3, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
-    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0,
+  // 強い息ほど横に広く散らばって生まれる
+  const spread = lerp(0.3, 0.65, smooth(0.3, 0.8, breath));
+  const b = {state: 'grow', x: lerp(-spread, spread, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
+    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15,
     u: norm([0, -1, 0.35]), v: [1, 0, 0], drift: lerp(-1, 1, rand()),
-    a2: 0, a2v: 0, b2: 0, b2v: 0, a3: 0, a3v: 0, a4: 0, a4v: 0};
+    a2: 0, a2v: 0, b2: 0, b2v: 0, a3: 0, a3v: 0, a4: 0, a4v: 0,
+    // 形の個性: 傾き・縦長さ・根元の細さ・横の平たさ・くびれ・揺れの大きさと速さ・育ちきる大きさ
+    look: {tilt: lerp(-0.4, 0.4, rand()), egg: lerp(-0.08, 0.14, rand()), pear: lerp(0.4, 1.7, rand()),
+      flat: lerp(-0.12, 0.12, rand()), waist: lerp(-0.05, 0.09, rand()), spin: lerp(-1, 1, rand()),
+      wobA: lerp(0.5, 2.0, rand()), wobF: lerp(0.6, 1.5, rand()), size: lerp(0.7, 1.15, rand())}};
   bubbles.push(b);
   return b;
 }
@@ -829,8 +835,8 @@ const sizeLight = r => Math.max(0.5, Math.min(1.8, Math.sqrt(0.3 / (r + 0.05))))
 function release(b, s) {
   b.state = 'free';
   // 強く吹くほど小さく、遠く（奥）へ。弱いと手前に残る
-  b.vz = -(0.3 + 3.0 * s * s);
-  b.vy = (0.4 + 4.5 * s) * sizeLight(b.r);   // 下のマイクに吹く息で上へ飛ぶ。強いほど、小さいほど勢いよく
+  b.vz = -(0.1 + 3.0 * s * s);
+  b.vy = (0.12 + 5.0 * Math.pow(s, 1.5)) * sizeLight(b.r);   // 下のマイクに吹く息で上へ飛ぶ。弱いとふわっと、強いほど・小さいほど勢いよく
   b.vx = (b.x >= 0 ? 1 : -1) * lerp(0.05, 0.6, rand()) * (0.2 + s);
   // プヨン: 卵形に引き伸ばされた膜が離れた瞬間に戻ろうとして、縦にポンと縮み、何度か揺れて丸に落ち着く
   b.a2v -= 6 * b.a2 + 1.5;
@@ -890,7 +896,7 @@ function popAt(cx, cy) {
   if (!best) return false;
   const hp = [rd[0] * bt - best.x, rd[1] * bt - best.y, CAMZ + rd[2] * bt - best.z];
   best.pop = {dir: norm(hp), t: 0, ang: 0};
-  if (grower === best) grower = null;
+  const gi = growers.indexOf(best); if (gi >= 0) growers.splice(gi, 1);
   if (best.state === 'grow') best.state = 'free';
   return true;
 }
@@ -898,21 +904,30 @@ function popAt(cx, cy) {
 function updateBubbles(dt, s) {
   const ds = (s - prevBreath) / Math.max(dt, 1e-3);   // 息の強さの変化（ふいの強まりで膜が波打つ）
   prevBreath = s;
-  // 吹いている間: 下端で玉が膨らむ。弱く長く＝ゆっくり大きく育つ／強く＝すぐちぎれて小さい玉が次々
+  // 吹いている間: 下端で玉が膨らむ
+  //  弱く＝1個だけ、ゆっくり大きく育つ／強く＝小さい玉が何個も同時に膨らみ、すぐちぎれて次々に出る
+  for (let i = growers.length - 1; i >= 0; i--) if (growers[i].pinch > 0 || growers[i].state !== 'grow') growers.splice(i, 1);
   if (s > 0.02) {
-    if (!grower) grower = spawn();
-    if (grower && grower.pinch === 0) {
-      const g = grower;
+    const want = s > 0.6 ? 3 : s > 0.35 ? 2 : 1;
+    const last = growers[growers.length - 1];
+    if (growers.length < want && (!last || last.age > 0.05)) { const g = spawn(); if (g) growers.push(g); }
+    for (const g of growers) {
       g.sAvg += (s - g.sAvg) * Math.min(1, dt * 3);
-      const rMax = lerp(1.25, 0.2, smooth(0.08, 0.8, g.sAvg)) * tune.size.v;
-      // 送り込む空気の量はほぼ一定 → 大きくなるほど半径の伸びはゆっくり。息の揺らぎで膨らみ方にむらが出る
-      const flow = (0.1 + 1.1 * s) * (0.55 + 0.45 * wav(g.age * 4.3, g.seed) + 0.25 * Math.max(0, ds));
+      const strong = smooth(0.08, 0.8, g.sAvg);
+      const rMax = lerp(1.15, 0.16, strong) * g.look.size * tune.size.v;
+      // 送り込む空気の量はほぼ一定 → 大きくなるほど半径の伸びはゆっくり。弱い息はさらにゆっくり。息の揺らぎで膨らみ方にむらが出る
+      const flow = (0.1 + 1.5 * s * s + 0.4 * s) * (0.55 + 0.45 * wav(g.age * 4.3 * g.look.wobF, g.seed) + 0.25 * Math.max(0, ds));
       g.r += Math.max(0, flow) * 0.6 / (g.r + 0.2) * dt;
-      if (g.r >= rMax) { g.r = rMax; g.pinch = 1e-4; }   // 大きくなりきった → ちぎれる
+      if (g.r >= rMax) {
+        g.r = rMax; g.pinch = 1e-4;   // 大きくなりきった → ちぎれる。大きい玉ほど根元がゆっくりくびれる
+        g.pinchDur = lerp(0.12, 0.6, smooth(0.25, 1.1, g.r));
+      }
     }
-  } else if (grower && grower.pinch === 0) {
+  } else {
     // 息が止まった: ある程度育っていればちぎれて飛ぶ、小さすぎればしぼんで消える
-    if (grower.r > 0.1) grower.pinch = 1e-4; else { grower.state = 'gone'; grower = null; }
+    for (const g of growers) {
+      if (g.r > 0.1) { g.pinch = 1e-4; g.pinchDur = lerp(0.12, 0.6, smooth(0.25, 1.1, g.r)); } else g.state = 'gone';
+    }
   }
 
   for (const b of bubbles) {
@@ -933,17 +948,26 @@ function updateBubbles(dt, s) {
     }
     if (b.state === 'grow') {
       b.age += dt;
-      // 下端に埋まった所から膨らむ。息で根元の細い卵形に伸び、息の揺らぎでぷるぷる波打つ
-      const tgt = {a2: 0.1 + 0.22 * s, b2: 0.05 * wav(b.age * 6.0, b.seed + 3) * s,
-        a3: -(0.06 + 0.16 * s), a4: 0.04 * wav(b.age * 9.0, b.seed + 7) * s};
-      const force = {a2: 1.5 * ds, a3: -1.0 * ds};
+      // 下端に埋まった所から膨らむ。形は玉ごとに違う（傾き・縦長・洋梨・平たさ・くびれ）
+      // 時間でも変わる: 息に押されて左右に傾き、平たい向きがゆっくり回り、空気が入るたびにぷくっと脈打つ
+      const L = b.look, A = b.age, wf = L.wobF;
+      const tilt = L.tilt + (0.18 + 0.25 * s) * wav(A * 1.1 * wf, b.seed + 11);
+      b.u = norm([Math.sin(tilt), -Math.cos(tilt), 0.35 + 0.15 * wav(A * 0.8, b.seed + 13)]);
+      const rot = L.spin * A * 0.9 + b.seed * 6.28;
+      b.v = [Math.cos(rot), 0.2 * Math.sin(rot * 0.7), Math.sin(rot)];
+      const wob = L.wobA * (0.35 + s);
+      const tgt = {a2: 0.06 + L.egg + 0.15 * s + 0.03 * wob * wav(A * 2.3 * wf, b.seed + 17),   // 最大でも約 0.43（上限 0.45 に張り付かない）
+        b2: L.flat + 0.06 * wob * wav(A * 3.1 * wf, b.seed + 3),
+        a3: -(0.03 + 0.14 * s) * L.pear + 0.04 * wob * wav(A * 1.7 * wf, b.seed + 19),
+        a4: L.waist * (0.4 + s) + 0.045 * wob * wav(A * 5.3 * wf, b.seed + 7)};
+      const force = {a2: 1.5 * ds, a3: -1.0 * ds, b2: 6.4 * ds * L.flat};
       if (b.pinch > 0) {
-        // ちぎれる直前（約0.15秒）: 根元がくびれて引き伸ばされ、少し持ち上がる
+        // ちぎれる直前: 根元がくびれて引き伸ばされ、持ち上がる。大きい玉ほどゆっくり（最大0.6秒）
         b.pinch += dt;
-        const p = smooth(0, 0.15, b.pinch);
+        const pd = b.pinchDur, p = smooth(0, pd, b.pinch);
         tgt.a2 = lerp(tgt.a2, 0.3, p); tgt.a3 = lerp(tgt.a3, -0.25, p); tgt.a4 = lerp(tgt.a4, 0.04, p);
-        b.y += 0.6 * b.r * dt / 0.15;
-        if (b.pinch >= 0.15) { release(b, Math.max(b.sAvg, s, 0.08)); if (grower === b) grower = null; }
+        b.y += 0.6 * b.r * dt / pd;
+        if (b.pinch >= pd) release(b, Math.max(b.sAvg, s, 0.05));
       } else {
         b.x += wav(b.age * 1.7, b.seed) * 0.05 * s * dt;
         b.y = -hy + b.r * 0.75;
@@ -959,7 +983,7 @@ function updateBubbles(dt, s) {
     const T = simT;
     const hn = clamp01((b.y + hy) / (2 * hy));            // 画面の高さ 0（下端）〜1（上端）
     const light = sizeLight(b.r);
-    const lift = s * hy * (1.6 - 0.8 * hn) * light;
+    const lift = s * (0.35 + 0.65 * smooth(0.1, 0.6, s)) * hy * (1.6 - 0.8 * hn) * light;
     const wind = [(0.12 * wav(T * 0.45, b.seed) + 0.06 * b.drift + s * 0.25 * b.drift) * light,
                   0.06 * wav(T * 0.6, b.seed + 2) * light + lift,
                   -0.04 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4)) - 0.8 * s * light];
