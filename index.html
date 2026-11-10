@@ -824,15 +824,12 @@ function spawn() {
   const z = lerp(1.0, 1.8, rand());
   const [hx] = viewHalf(z);
   // ストローの口: 画面下の真ん中あたりの狭い所から生まれる
-  // 飛ぶ向きは生まれた時に決める。真上から左右へ扇状に、強い息ほど広く開く（弱 ±14° 〜 強 ±57°）
-  const fanMax = lerp(0.25, 1.0, smooth(0.1, 0.8, breath));
-  const fanA = lerp(-fanMax, fanMax, rand());
-  const b = {state: 'grow', x: (lerp(-0.08, 0.08, rand()) + 0.08 * Math.sin(fanA)) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
-    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15, fan: Math.tan(fanA),
-    u: norm([0, -1, 0.35]), v: [1, 0, 0], drift: lerp(-1, 1, rand()),
+  const b = {state: 'grow', x: lerp(-0.1, 0.1, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
+    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15,
+    u: norm([0, -1, 0.35]), v: [1, 0, 0],
     a2: 0, a2v: 0, b2: 0, b2v: 0, a3: 0, a3v: 0, a4: 0, a4v: 0,
     // 形の個性: 傾き・縦長さ・根元の細さ・横の平たさ・くびれ・揺れの大きさと速さ・育ちきる大きさ
-    look: {tilt: -fanA * 0.8 + lerp(-0.15, 0.15, rand()),   // 飛んでいく向きへ傾いて膨らむ（u は根元向きなので逆符号）
+    look: {tilt: lerp(-0.25, 0.25, rand()),
       egg: lerp(-0.08, 0.14, rand()), pear: lerp(0.4, 1.7, rand()),
       flat: lerp(-0.12, 0.12, rand()), waist: lerp(-0.05, 0.09, rand()), spin: lerp(-1, 1, rand()),
       wobA: lerp(0.5, 2.0, rand()), wobF: lerp(0.6, 1.5, rand()), size: lerp(0.55, 1.2, rand())}};
@@ -855,6 +852,21 @@ function springs(b, tgt, force, dt) {
   for (const k of MODES) b[k] = Math.max(-0.45, Math.min(0.45, b[k]));
 }
 
+// 空気の乱れ（タービュランス）: 空間に置いた渦の模様。流れ関数 ψ = Σ a·sin(kx+…)·sin(1.13ky+…) の回転
+// （vx = ∂ψ/∂y, vy = -∂ψ/∂x）なので、流れが湧いたり吸い込まれたりせず、くるくる巻く。模様はゆっくり流れて変わる
+// 列: 波数 k（大きいほど細かい渦）, 強さ a, 動く速さ w, ずらし p
+const TURB = [[1.3, 1.0, 0.35, 0.0], [2.7, 0.42, 0.7, 2.1], [5.3, 0.17, 1.3, 4.3]];
+let turbAmp = 0.12;   // 乱れの強さ。吹くと空気がかき回されて強まり、止めるとゆっくり落ち着く
+function turb(x, y, z, t) {
+  let vx = 0, vy = 0;
+  for (const [k, a, w, p] of TURB) {
+    const X = k * x + 0.6 * k * z + p + w * t, Y = 1.13 * k * y + 1.7 * p - 0.8 * w * t;
+    vx += a * 1.13 * k * Math.sin(X) * Math.cos(Y);
+    vy -= a * k * Math.cos(X) * Math.sin(Y);
+  }
+  return [vx * turbAmp, vy * turbAmp];
+}
+
 // 玉の軽さ（重さの逆。風・息への乗りやすさの倍率）: 半径 0.1 で約 2.0、0.3 で 1.0、1.0 で約 0.4
 // 膜の重さは表面積（r²）、空気に押される力は断面（r²）だが、大きい玉ほど中の空気ごと動かすぶん鈍い、という手触りで決めた値
 const sizeLight = r => Math.max(0.4, Math.min(2.6, Math.pow(0.35 / (r + 0.05), 0.8)));
@@ -863,7 +875,7 @@ function release(b, s) {
   // 強く吹くほど小さく、遠く（奥）へ。弱いと手前に残る
   b.vz = -(0.1 + 3.0 * s * s) * sizeLight(b.r);   // 小さい玉ほど遠く（奥）へ
   b.vy = (0.12 + 5.0 * Math.pow(s, 1.5)) * sizeLight(b.r);   // 下のマイクに吹く息で上へ飛ぶ。弱いとふわっと、強いほど・小さいほど勢いよく
-  b.vx = b.vy * b.fan;   // 生まれた時に決めた扇の向きへ
+  b.vx = b.vy * lerp(-0.08, 0.08, rand());   // ほぼ真上へまっすぐ。広がるのは、遅くなってから空気の乱れに流されるため
   // プヨン: 卵形に引き伸ばされた膜が離れた瞬間に戻ろうとして、縦にポンと縮み、何度か揺れて丸に落ち着く
   b.a2v -= 6 * b.a2 + 1.5;
   b.a3v += 4;
@@ -934,6 +946,8 @@ function popAll() {
 }
 
 function updateBubbles(dt, s) {
+  const tA = 0.12 + 0.7 * s;   // 吹くとすぐ強まり（0.5 秒ほど）、止めるとゆっくり（2.5 秒ほど）落ち着く
+  turbAmp += (tA - turbAmp) * Math.min(1, dt * (tA > turbAmp ? 2.0 : 0.4));
   const ds = (s - prevBreath) / Math.max(dt, 1e-3);   // 息の強さの変化（ふいの強まりで膜が波打つ）
   prevBreath = s;
   // 吹いている間: 下端で玉が膨らむ
@@ -1012,19 +1026,23 @@ function updateBubbles(dt, s) {
       continue;
     }
     if (b.state === 'gone') { b.r *= Math.exp(-12 * dt); continue; }
+    const hx = viewHalf(b.z)[0];
 
-    // 吹いている間: 息の上昇気流で画面の上へ吹き上がる（下の方ほど強い）。少し奥へも押される
-    // 吹いていない間: 空気に止められて、その場でゆらゆら漂う（ごくゆっくり横と奥へ）
-    // 大きさの差: 大きい玉は重く鈍い（息にゆっくり乗り、上がりも控えめ）。小さい玉は軽く、息ですぐ飛ばされ、よく揺れる
+    // 玉はまわりの空気の流れに引きずられて動く（速さが空気の速さへ近づく）。空気の流れ = 息の柱 ＋ 空気の乱れ
+    //  息の柱: ストローの口（下の真ん中）からまっすぐ上へ吹く。上ほど太く弱くなる。柱から外れた玉は押されない
+    //  乱れ: 離れたての玉は勢いがあるのでまっすぐ進むが、遅くなるほど乱れに流されて、左右へばらけて広がる
+    // 大きさの差: 大きい玉は重く鈍い（空気に乗るのが遅い）。小さい玉は軽く、息にも乱れにもすぐ乗る
     const T = simT;
     const hn = clamp01((b.y + hy) / (2 * hy));            // 画面の高さ 0（下端）〜1（上端）
     const light = sizeLight(b.r);
-    const lift = s * (0.35 + 0.65 * smooth(0.1, 0.6, s)) * hy * (1.6 - 0.8 * hn) * light;
-    const wind = [(0.12 * wav(T * 0.45, b.seed) + 0.06 * b.drift) * light + lift * b.fan,   // 吹いている間は扇の向きに沿って上へ
-                  0.06 * wav(T * 0.6, b.seed + 2) * light + lift,
-                  -0.04 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4)) - 0.8 * s * light];
-    // 空気に乗る速さ: 小さい玉ほど速い。吹いている間は息にすぐ乗るよう強め
-    const k = Math.min(1, dt * (1.5 + 2.5 * s) * 0.7 / (b.r + 0.1));
+    const jw = 0.18 + 0.5 * hn;                           // 柱の太さ（画面の半幅に対して）。上ほど広がる
+    const jet = Math.exp(-Math.pow(b.x / (hx * jw), 2)) * (1.2 - 0.6 * hn);
+    const lift = s * (0.35 + 0.65 * smooth(0.1, 0.6, s)) * hy * 1.4 * jet * light;
+    const tb = turb(b.x, b.y, b.z, T);
+    const wind = [tb[0], tb[1] + lift,
+                  -0.04 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4)) - 0.8 * s * jet * light];
+    // 空気に乗る速さ（引きずられる強さ）: 小さい玉ほど速い
+    const k = Math.min(1, dt * (1.2 + 1.0 * s) * 0.6 / (b.r + 0.1));
     b.vx += (wind[0] - b.vx) * k;
     b.vy += (wind[1] - b.vy) * k - 0.04 * dt;             // わずかな重さ
     b.vz += (wind[2] - b.vz) * k;
