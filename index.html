@@ -702,12 +702,34 @@ const goLabel = document.getElementById('go').firstElementChild;
 if (single || demo) dock.hidden = false; else startEl.hidden = false;
 function enter() { startEl.hidden = true; dock.hidden = false; }
 // マイクは click の中で開く（iPhone ではタッチの押し始めはユーザー操作として扱われない）
-document.getElementById('go').addEventListener('click', () => startMic());
+document.getElementById('go').addEventListener('click', () => { startShake(); startMic(); });
 document.getElementById('nomic').addEventListener('click', () => {
+  startShake();
   enter();
   setHint(matchMedia('(pointer: fine)').matches ? 'Hold 1 / 2 / 3 to blow soft / medium / hard' : 'No microphone. Reload to start again', 5000);
 });
 document.getElementById('clear').addEventListener('click', () => { bubbles.length = 0; drops.length = 0; growers.length = 0; });
+
+// ---------------- スマホを振ると、飛んでいる玉がぜんぶ割れる ----------------
+// iPhone は動きのセンサーにも許可が要る。許可を求めるのはボタンの click の中で（マイクと同じ理由）
+let shakeOn = false, lastShake = 0;
+function startShake() {
+  if (shakeOn || !('DeviceMotionEvent' in window)) return;
+  const on = () => { if (!shakeOn) { shakeOn = true; addEventListener('devicemotion', onMotion); } };
+  if (typeof DeviceMotionEvent.requestPermission === 'function')
+    DeviceMotionEvent.requestPermission().then(r => { if (r === 'granted') on(); }).catch(() => {});
+  else on();
+}
+function onMotion(e) {
+  // 重力を除いた加速度（m/s²）。取れない機種は重力込みの値から 9.8 を引いて使う
+  const a = e.acceleration, g = e.accelerationIncludingGravity;
+  let m;
+  if (a && a.x != null) m = Math.hypot(a.x, a.y, a.z);
+  else if (g && g.x != null) m = Math.abs(Math.hypot(g.x, g.y, g.z) - 9.8);
+  else return;
+  const now = performance.now();
+  if (m > 14 && now - lastShake > 700) { lastShake = now; popAll(); }
+}
 
 // ---------------- マイク（息の検出） ----------------
 // 息は 1〜6kHz に広がる雑音。周りの音の大きさ（ゆっくり追う下限）より何 dB 大きいかで強さを決める
@@ -801,16 +823,19 @@ function spawn() {
   }
   const z = lerp(1.0, 1.8, rand());
   const [hx] = viewHalf(z);
-  // 強い息ほど横に広く散らばって生まれる
-  const spread = lerp(0.3, 0.85, smooth(0.3, 0.8, breath));
-  const b = {state: 'grow', x: lerp(-spread, spread, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
-    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15,
+  // ストローの口: 画面下の真ん中あたりの狭い所から生まれる
+  // 飛ぶ向きは生まれた時に決める。真上から左右へ扇状に、強い息ほど広く開く（弱 ±14° 〜 強 ±57°）
+  const fanMax = lerp(0.25, 1.0, smooth(0.1, 0.8, breath));
+  const fanA = lerp(-fanMax, fanMax, rand());
+  const b = {state: 'grow', x: (lerp(-0.08, 0.08, rand()) + 0.08 * Math.sin(fanA)) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
+    r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15, fan: Math.tan(fanA),
     u: norm([0, -1, 0.35]), v: [1, 0, 0], drift: lerp(-1, 1, rand()),
     a2: 0, a2v: 0, b2: 0, b2v: 0, a3: 0, a3v: 0, a4: 0, a4v: 0,
     // 形の個性: 傾き・縦長さ・根元の細さ・横の平たさ・くびれ・揺れの大きさと速さ・育ちきる大きさ
-    look: {tilt: lerp(-0.4, 0.4, rand()), egg: lerp(-0.08, 0.14, rand()), pear: lerp(0.4, 1.7, rand()),
+    look: {tilt: -fanA * 0.8 + lerp(-0.15, 0.15, rand()),   // 飛んでいく向きへ傾いて膨らむ（u は根元向きなので逆符号）
+      egg: lerp(-0.08, 0.14, rand()), pear: lerp(0.4, 1.7, rand()),
       flat: lerp(-0.12, 0.12, rand()), waist: lerp(-0.05, 0.09, rand()), spin: lerp(-1, 1, rand()),
-      wobA: lerp(0.5, 2.0, rand()), wobF: lerp(0.6, 1.5, rand()), size: lerp(0.7, 1.15, rand())}};
+      wobA: lerp(0.5, 2.0, rand()), wobF: lerp(0.6, 1.5, rand()), size: lerp(0.55, 1.2, rand())}};
   bubbles.push(b);
   return b;
 }
@@ -830,14 +855,15 @@ function springs(b, tgt, force, dt) {
   for (const k of MODES) b[k] = Math.max(-0.45, Math.min(0.45, b[k]));
 }
 
-// 玉の軽さ（風・息への乗りやすさの倍率）: 半径 0.1 で約 1.4、0.3 で約 0.9、1.0 で約 0.5
-const sizeLight = r => Math.max(0.5, Math.min(1.8, Math.sqrt(0.3 / (r + 0.05))));
+// 玉の軽さ（重さの逆。風・息への乗りやすさの倍率）: 半径 0.1 で約 2.0、0.3 で 1.0、1.0 で約 0.4
+// 膜の重さは表面積（r²）、空気に押される力は断面（r²）だが、大きい玉ほど中の空気ごと動かすぶん鈍い、という手触りで決めた値
+const sizeLight = r => Math.max(0.4, Math.min(2.6, Math.pow(0.35 / (r + 0.05), 0.8)));
 function release(b, s) {
   b.state = 'free';
   // 強く吹くほど小さく、遠く（奥）へ。弱いと手前に残る
-  b.vz = -(0.1 + 3.0 * s * s);
+  b.vz = -(0.1 + 3.0 * s * s) * sizeLight(b.r);   // 小さい玉ほど遠く（奥）へ
   b.vy = (0.12 + 5.0 * Math.pow(s, 1.5)) * sizeLight(b.r);   // 下のマイクに吹く息で上へ飛ぶ。弱いとふわっと、強いほど・小さいほど勢いよく
-  b.vx = (b.x >= 0 ? 1 : -1) * lerp(0.05, 0.6, rand()) * (0.2 + s);
+  b.vx = b.vy * b.fan;   // 生まれた時に決めた扇の向きへ
   // プヨン: 卵形に引き伸ばされた膜が離れた瞬間に戻ろうとして、縦にポンと縮み、何度か揺れて丸に落ち着く
   b.a2v -= 6 * b.a2 + 1.5;
   b.a3v += 4;
@@ -901,6 +927,12 @@ function popAt(cx, cy) {
   return true;
 }
 
+// 飛んでいる玉をぜんぶ割る。いっせいではなく 0.15 秒の間にばらばらに（パチパチッと続けて割れる）
+function popAll() {
+  for (const b of bubbles)
+    if (b.state === 'free' && !b.pop && b.popIn === undefined) b.popIn = lerp(0, 0.15, rand());
+}
+
 function updateBubbles(dt, s) {
   const ds = (s - prevBreath) / Math.max(dt, 1e-3);   // 息の強さの変化（ふいの強まりで膜が波打つ）
   prevBreath = s;
@@ -932,6 +964,10 @@ function updateBubbles(dt, s) {
 
   for (const b of bubbles) {
     const hy = viewHalf(b.z)[1];
+    if (b.popIn !== undefined && !b.pop && (b.popIn -= dt) <= 0) {
+      // 振って割れる玉: 穴の向きはばらばら
+      b.pop = {dir: norm([lerp(-1, 1, rand()), lerp(-1, 1, rand()), lerp(-0.2, 1, rand())]), t: 0, ang: 0};
+    }
     if (b.pop) {
       // 割れている最中: 穴が触った所から広がり、縁が縮みながらしぶきを飛ばす
       b.pop.t += dt;
@@ -984,7 +1020,7 @@ function updateBubbles(dt, s) {
     const hn = clamp01((b.y + hy) / (2 * hy));            // 画面の高さ 0（下端）〜1（上端）
     const light = sizeLight(b.r);
     const lift = s * (0.35 + 0.65 * smooth(0.1, 0.6, s)) * hy * (1.6 - 0.8 * hn) * light;
-    const wind = [(0.12 * wav(T * 0.45, b.seed) + 0.06 * b.drift + s * 0.25 * b.drift) * light,
+    const wind = [(0.12 * wav(T * 0.45, b.seed) + 0.06 * b.drift) * light + lift * b.fan,   // 吹いている間は扇の向きに沿って上へ
                   0.06 * wav(T * 0.6, b.seed + 2) * light + lift,
                   -0.04 * (0.5 + 0.5 * wav(T * 0.3, b.seed + 4)) - 0.8 * s * light];
     // 空気に乗る速さ: 小さい玉ほど速い。吹いている間は息にすぐ乗るよう強め
