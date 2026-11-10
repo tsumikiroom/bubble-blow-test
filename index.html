@@ -276,7 +276,7 @@ const lambdas = [], weights = [];
 const vs = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 
-const MAXB = 20, MAXP = 4000;   // MAXP: しぶきの粒の上限
+const MAXB = 32, MAXP = 4000;   // MAXB: 玉の上限（シェーダーの uniform は ほか 47 本＋玉ごと 5×32=160 本＝207 本。WebGL2 の最低保証 224 本に収まる）／MAXP: しぶきの粒の上限
 const fs = `#version 300 es
 precision highp float;
 out vec4 o;
@@ -802,7 +802,7 @@ function spawn() {
   const z = lerp(1.0, 1.8, rand());
   const [hx] = viewHalf(z);
   // 強い息ほど横に広く散らばって生まれる
-  const spread = lerp(0.3, 0.65, smooth(0.3, 0.8, breath));
+  const spread = lerp(0.3, 0.85, smooth(0.3, 0.8, breath));
   const b = {state: 'grow', x: lerp(-spread, spread, rand()) * hx, y: 0, z, vx: 0, vy: 0, vz: 0,
     r: 0.03, sAvg: breath, age: 0, seed: rand(), pinch: 0, pinchDur: 0.15,
     u: norm([0, -1, 0.35]), v: [1, 0, 0], drift: lerp(-1, 1, rand()),
@@ -908,9 +908,9 @@ function updateBubbles(dt, s) {
   //  弱く＝1個だけ、ゆっくり大きく育つ／強く＝小さい玉が何個も同時に膨らみ、すぐちぎれて次々に出る
   for (let i = growers.length - 1; i >= 0; i--) if (growers[i].pinch > 0 || growers[i].state !== 'grow') growers.splice(i, 1);
   if (s > 0.02) {
-    const want = s > 0.6 ? 3 : s > 0.35 ? 2 : 1;
+    const want = s > 0.6 ? 9 : s > 0.35 ? 4 : 1;
     const last = growers[growers.length - 1];
-    if (growers.length < want && (!last || last.age > 0.05)) { const g = spawn(); if (g) growers.push(g); }
+    if (growers.length < want && (!last || last.age > (s > 0.6 ? 0.012 : 0.05))) { const g = spawn(); if (g) growers.push(g); }
     for (const g of growers) {
       g.sAvg += (s - g.sAvg) * Math.min(1, dt * 3);
       const strong = smooth(0.08, 0.8, g.sAvg);
