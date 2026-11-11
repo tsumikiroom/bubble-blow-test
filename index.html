@@ -710,7 +710,7 @@ document.getElementById('nomic').addEventListener('click', () => {
 });
 document.getElementById('clear').addEventListener('click', () => { bubbles.length = 0; drops.length = 0; growers.length = 0; });
 
-// ---------------- スマホを振ると、飛んでいる玉がぜんぶ割れる ----------------
+// ---------------- スマホを振ると、飛んでいる玉が割れる（強く振るほどたくさん） ----------------
 // iPhone は動きのセンサーにも許可が要る。許可を求めるのはボタンの click の中で（マイクと同じ理由）
 let shakeOn = false, lastShake = 0;
 function startShake() {
@@ -728,7 +728,8 @@ function onMotion(e) {
   else if (g && g.x != null) m = Math.abs(Math.hypot(g.x, g.y, g.z) - 9.8);
   else return;
   const now = performance.now();
-  if (m > 14 && now - lastShake > 700) { lastShake = now; popAll(); }
+  // 弱いひと振り（10）では一部だけ、強く振る（30 以上）とほぼ全部割れる。続けて振れば残りも割れていく
+  if (m > 10 && now - lastShake > 300) { lastShake = now; popAll(smooth(10, 30, m)); }
 }
 
 // ---------------- マイク（息の検出） ----------------
@@ -809,6 +810,7 @@ const wav = (t, s) => 0.6 * Math.sin(t + s * 6.1) + 0.4 * Math.sin(t * 2.31 + s 
 
 const bubbles = [];
 const growers = [];     // いま膨らんでいる玉（画面の下端にくっついている）。強く吹くと同時に何個も
+let spawnAcc = 0;       // 次の玉が生まれるまでのたまり（1 たまるごとに 1 個）
 let breath = 0, prevBreath = 0, simT = 0;
 const MODES = ['a2', 'b2', 'a3', 'a4'];
 
@@ -939,10 +941,13 @@ function popAt(cx, cy) {
   return true;
 }
 
-// 飛んでいる玉をぜんぶ割る。いっせいではなく 0.15 秒の間にばらばらに（パチパチッと続けて割れる）
-function popAll() {
+// 振って割る。振りの強さ k（0〜1）で割れる割合が決まる（弱いと 2 割ほど、強いとほぼ全部）
+// 割れる時間もばらばら: すぐ割れる玉から 0.5 秒ほど遅れて割れる玉まで（早い玉が多い）
+function popAll(k) {
+  const chance = lerp(0.2, 0.97, k);
   for (const b of bubbles)
-    if (b.state === 'free' && !b.pop && b.popIn === undefined) b.popIn = lerp(0, 0.15, rand());
+    if (b.state === 'free' && !b.pop && b.popIn === undefined && rand() < chance)
+      b.popIn = 0.5 * Math.pow(rand(), 2) * lerp(1.0, 0.6, k);
 }
 
 function updateBubbles(dt, s) {
@@ -954,9 +959,10 @@ function updateBubbles(dt, s) {
   //  弱く＝1個だけ、ゆっくり大きく育つ／強く＝小さい玉が何個も同時に膨らみ、すぐちぎれて次々に出る
   for (let i = growers.length - 1; i >= 0; i--) if (growers[i].pinch > 0 || growers[i].state !== 'grow') growers.splice(i, 1);
   if (s > 0.02) {
-    const want = s > 0.6 ? 9 : s > 0.35 ? 4 : 1;
-    const last = growers[growers.length - 1];
-    if (growers.length < want && (!last || last.age > (s > 0.6 ? 0.012 : 0.05))) { const g = spawn(); if (g) growers.push(g); }
+    const want = s > 0.6 ? 9 : s > 0.35 ? 3 : 1;
+    const rate = s > 0.6 ? 50 : 16;   // 1 秒に生まれる数の上限。強い息は約 46 個/秒（前の 0.8 倍）。中の息は膨らむ速さで決まり、同時に 3 個で約 3 個/秒（前の約 0.75 倍）
+    spawnAcc = Math.min(spawnAcc + rate * dt, 2);
+    if (growers.length < want && spawnAcc >= 1) { const g = spawn(); if (g) { growers.push(g); spawnAcc -= 1; } }
     for (const g of growers) {
       g.sAvg += (s - g.sAvg) * Math.min(1, dt * 3);
       const strong = smooth(0.08, 0.8, g.sAvg);
